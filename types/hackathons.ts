@@ -60,6 +60,7 @@ export type Hackathon = {
   speakers_banner: string
   speakers_text: string
   resources: Resource[]
+  tech_stack_options?: { name: string }[]
   stages: HackathonStage[]
 }
 
