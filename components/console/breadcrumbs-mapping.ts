@@ -11,8 +11,10 @@ export const pathToBreadcrumb = {
 
   // Layer 1
   "/console/layer-1/create": ["Console", "Layer 1", "Create New L1"],
+  "/console/layer-1/upgrade": ["Console", "Layer 1", "Upgrade JSON"],
   "/console/layer-1/l1-node-setup": ["Console", "Layer 1", "L1 Node Setup"],
   "/console/layer-1/explorer-setup": ["Console", "Layer 1", "Explorer Setup"],
+  "/console/layer-1/advance-pchain-view": ["Console", "Layer 1", "Advance P-Chain View"],
 
   // L1 Tokenomics
   "/console/l1-tokenomics/fee-manager": ["Console", "L1 Tokenomics", "Transaction Fee Parameters"],

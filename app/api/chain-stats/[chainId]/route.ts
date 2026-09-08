@@ -1,19 +1,12 @@
 import { NextResponse } from 'next/server';
 import { TimeSeriesDataPoint, TimeSeriesMetric, ICMDataPoint, ICMMetric, STATS_CONFIG, getTimestampsFromTimeRange, createTimeSeriesMetric, createICMMetric } from "@/types/stats";
 import { getChainICMData } from "@/lib/icm-clickhouse";
+import { DEDICATED_STATS_BASE_URL, resolveDedicatedMetricsChain } from "@/lib/dedicated-stats";
 
 export const dynamic = 'force-dynamic';
 
 const REQUEST_TIMEOUT_MS = 8000;
 const CACHE_CONTROL_HEADER = 'public, max-age=14400, s-maxage=14400, stale-while-revalidate=86400';
-const METRICS_API_URL = process.env.METRICS_API_URL;
-if (!METRICS_API_URL) {
-  console.warn('METRICS_API_URL is not set — chain-stats endpoint will fail');
-}
-
-// KiteAI mainnet L1 is not indexed by the shared Metrics API
-const KITEAI_MAINNET_CHAIN_ID = '3USaEfTcoUhHxpKXvpAG916UKCUEyjrtkg2hBArBG3JyDP7my';
-const KITEAI_METRICS_SOURCE = { baseUrl: 'http://44.221.18.159', evmChainId: '2366' };
 
 interface ChainMetrics {
   activeAddresses: {
@@ -81,34 +74,36 @@ async function fetchMetricsApi(
   pageSize: number,
   fetchAllPages: boolean
 ): Promise<{ value: number; timestamp: number }[]> {
-  const isKiteAi = chainId === KITEAI_MAINNET_CHAIN_ID;
-  const baseUrl = isKiteAi ? KITEAI_METRICS_SOURCE.baseUrl : METRICS_API_URL;
-  const resolvedChainId = isKiteAi
-    ? KITEAI_METRICS_SOURCE.evmChainId
+  const dedicatedEvmChainId = resolveDedicatedMetricsChain(chainId);
+  const resolvedChainId = dedicatedEvmChainId
+    ? dedicatedEvmChainId
     : chainId === 'all' ? 'mainnet' : chainId;
-  const allResults: { value: number; timestamp: number }[] = [];
-  let pageToken: string | undefined;
 
-  do {
-    const url = new URL(`${baseUrl}/v2/chains/${resolvedChainId}/metrics/${metric}`);
-    url.searchParams.set('timeInterval', timeInterval);
-    url.searchParams.set('startTimestamp', String(startTimestamp));
-    url.searchParams.set('endTimestamp', String(endTimestamp));
-    url.searchParams.set('pageSize', String(pageSize));
-    if (pageToken) url.searchParams.set('pageToken', pageToken);
+  const fetchPages = async (baseUrl: string): Promise<{ value: number; timestamp: number }[]> => {
+    const allResults: { value: number; timestamp: number }[] = [];
+    let pageToken: string | undefined;
+    do {
+      const url = new URL(`${baseUrl}/v2/chains/${resolvedChainId}/metrics/${metric}`);
+      url.searchParams.set('timeInterval', timeInterval);
+      url.searchParams.set('startTimestamp', String(startTimestamp));
+      url.searchParams.set('endTimestamp', String(endTimestamp));
+      url.searchParams.set('pageSize', String(pageSize));
+      if (pageToken) url.searchParams.set('pageToken', pageToken);
 
-    const res = await fetchWithTimeout(url.toString());
-    if (!res.ok) throw new Error(`metrics-api ${res.status}: ${res.statusText}`);
-    const data = await res.json();
+      const res = await fetchWithTimeout(url.toString());
+      if (!res.ok) throw new Error(`metrics-api ${res.status}: ${res.statusText}`);
+      const data = await res.json();
 
-    if (data.results && Array.isArray(data.results)) {
-      allResults.push(...data.results);
-    }
+      if (data.results && Array.isArray(data.results)) {
+        allResults.push(...data.results);
+      }
 
-    pageToken = data.nextPageToken || undefined;
-  } while (fetchAllPages && pageToken);
+      pageToken = data.nextPageToken || undefined;
+    } while (fetchAllPages && pageToken);
+    return allResults;
+  };
 
-  return allResults;
+  return fetchPages(DEDICATED_STATS_BASE_URL);
 }
 
 async function getTimeSeriesData(

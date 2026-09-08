@@ -5,6 +5,7 @@ import { withAuth } from "@/lib/protectedRoute";
 import { prisma } from "@/prisma/prisma";
 import { syncUserDataToHubSpot } from "@/server/services/hubspotUserData";
 import { isTeam1Event } from "@/lib/events/team1";
+import { normalizeEmail } from "@/lib/utils";
 
 type UserConsentsInput = {
   notifications?: unknown;
@@ -117,18 +118,12 @@ export const POST = withAuth(async (
       { status: 201 }
     );
   } catch (error: any) {
-    console.error('Error POST /api/register-form:', error.message);
+    console.error('Error POST /api/register-form:', error.message, error.stack);
     const wrappedError = error as Error;
+    const isValidation = wrappedError.cause == 'ValidationError';
     return NextResponse.json(
-      {
-        error: {
-          message: wrappedError.message,
-          stack: wrappedError.stack,
-          cause: wrappedError.cause,
-          name: wrappedError.name
-        }
-      },
-      { status: wrappedError.cause == 'ValidationError' ? 400 : 500 }
+      { error: { message: isValidation ? wrappedError.message : 'Internal server error' } },
+      { status: isValidation ? 400 : 500 }
     );
   }
 });
@@ -146,15 +141,17 @@ export const GET = withAuth(async (req: NextRequest, context: any, session: any)
       return NextResponse.json({ error: "Email required" }, { status: 400 });
     }
 
-    // Verify that email matches the authenticated session user's email
-    if (email !== session.user.email) {
+    // Verify that email matches the authenticated session user's email.
+    // Session email is normalized; normalize the param so a client passing the
+    // originally-typed casing doesn't get a spurious 403.
+    if (normalizeEmail(email) !== session.user.email) {
       return NextResponse.json(
         { error: "Forbidden: You can only access your own registration forms" },
         { status: 403 }
       );
     }
 
-    const registerFormLoaded = await getRegisterForm(email, id);
+    const registerFormLoaded = await getRegisterForm(session.user.email, id);
 
     return NextResponse.json(registerFormLoaded);
   } catch (error) {

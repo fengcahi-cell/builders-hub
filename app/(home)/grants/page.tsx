@@ -8,13 +8,6 @@ import { ArrowRight, Shield } from "lucide-react";
 // Program card data with images
 const programs = [
   {
-    title: "Retro9000",
-    description: "Build innovative projects on Avalanche and get rewarded for your creativity and impact.",
-    href: "https://retro9000.avax.network",
-    external: true,
-    image: "https://qizat5l3bwvomkny.public.blob.vercel-storage.com/builders-hub/nav-banner/9000-logo-FYhqyinnspUefGJcGgj9AcT116yq98.png",
-  },
-  {
     title: "Call for Research Proposals",
     description: "Submit academic research on the economics of cryptoassets and decentralized networks. Up to $50,000 in research grants.",
     href: "/grants/avalanche-research-proposals",
@@ -54,9 +47,9 @@ const partnerPrograms = [
   },
 {
     title: "Security Audits",
-    description: "Explore 20+ trusted auditing providers and find the right partner to review, test, and strengthen your smart contracts.",
-    href: "https://areta.market/avalanche",
-    external: true,
+    description: "Request quotes from every vetted firm on the Ava Labs whitelist. Free, private, and subsidized up to 75% by the program.",
+    href: "/audits",
+    external: false,
     image: "/images/auditagent.png",
   },
 ];

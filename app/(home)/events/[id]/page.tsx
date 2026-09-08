@@ -15,6 +15,7 @@ import {
   getSubmissionStatus,
   type SubmissionStatus,
 } from "@/lib/hackathons/submission-progress";
+import { MemberStatus } from "@/types/project";
 
 export const revalidate = 60;
 export const dynamicParams = true;
@@ -49,10 +50,10 @@ export async function generateMetadata({
       title: hackathon.title,
       description: hackathon.description,
       openGraph: {
-        images: `/api/og/events/${id}`,
+        images: `/api/og/events/${id}?v=2`,
       },
       twitter: {
-        images: `/api/og/events/${id}`,
+        images: `/api/og/events/${id}?v=2`,
       },
     });
   } catch (error) {
@@ -94,7 +95,7 @@ export default async function HackathonPage({
             where: {
               hackaton_id: id,
               members: {
-                some: { user_id: session.user.id, status: "Confirmed" },
+                some: { user_id: session.user.id, status: MemberStatus.CONFIRMED },
               },
             },
             select: {
