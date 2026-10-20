@@ -17,11 +17,16 @@ import { setL1ValidatorWeight } from './methods/setL1ValidatorWeight';
 import { SetL1ValidatorWeightParams } from './methods/setL1ValidatorWeight';
 import { increaseL1ValidatorBalance, IncreaseL1ValidatorBalanceParams } from './methods/increaseL1ValidatorBalance';
 import { disableL1Validator, DisableL1ValidatorParams } from './methods/disableL1Validator';
+import { removeSubnetValidator, RemoveSubnetValidatorParams } from './methods/removeSubnetValidator';
 import { ExtractChainInfoResponse } from './methods/extractChainInfo';
 
 // Re-export custom Avalanche EVM RPC methods that should be called on publicClient
 export { getActiveRulesAt } from './methods/getActiveRulesAt';
 export type { GetActiveRulesAtResponse } from './methods/getActiveRulesAt';
+
+import { avalancheProvider } from './provider';
+
+export { setAvalancheProviderOverride, avalancheProvider } from './provider';
 
 // Type for the Avalanche wallet client with custom methods at root level
 export type CoreWalletClientType = Omit<AvalancheWalletClient, 'addChain'> & {
@@ -38,6 +43,7 @@ export type CoreWalletClientType = Omit<AvalancheWalletClient, 'addChain'> & {
   setL1ValidatorWeight: (args: SetL1ValidatorWeightParams) => Promise<string>;
   increaseL1ValidatorBalance: (args: IncreaseL1ValidatorBalanceParams) => Promise<string>;
   disableL1Validator: (args: DisableL1ValidatorParams) => Promise<string>;
+  removeSubnetValidator: (args: RemoveSubnetValidatorParams) => Promise<string>;
   getEthereumChain: () => Promise<GetEthereumChainResponse>;
   extractChainInfo: (args: ExtractChainInfoParams) => Promise<ExtractChainInfoResponse>;
   getPChainBalance: () => Promise<bigint>;
@@ -68,10 +74,9 @@ export async function createCoreWalletClient(
     return null; // Return null for SSR
   }
 
-  // Check if window.avalanche exists and is an object
-  if (!window.avalanche || typeof window.avalanche !== 'object') {
-    return null; // Return null if Core wallet is not found
-  }
+  const provider = avalancheProvider();
+  // An element with id="avalanche" (an "Avalanche" heading) is also window.avalanche, so check for a real provider.
+  if (typeof provider?.request !== 'function') return null; // Neither Core nor a Console wallet
 
   // Determine testnet status: prefer the explicit override, fall back to
   // Core Wallet's own report (which is unreliable for custom L1 chains).
@@ -79,7 +84,7 @@ export async function createCoreWalletClient(
   if (typeof isTestnetOverride === 'boolean') {
     useTestnet = isTestnetOverride;
   } else {
-    const chain = await window.avalanche.request<GetEthereumChainResponse>({
+    const chain = await provider.request<GetEthereumChainResponse>({
       method: 'wallet_getEthereumChain',
     });
     useTestnet = chain.isTestnet;
@@ -90,7 +95,7 @@ export async function createCoreWalletClient(
     chain: useTestnet ? avalancheFuji : avalanche,
     transport: {
       type: 'custom',
-      provider: window.avalanche,
+      provider: provider as never,
     },
     account: _account,
   });
@@ -112,6 +117,7 @@ export async function createCoreWalletClient(
     increaseL1ValidatorBalance: (args: IncreaseL1ValidatorBalanceParams) =>
       increaseL1ValidatorBalance(baseClient, args),
     disableL1Validator: (args: DisableL1ValidatorParams) => disableL1Validator(baseClient, args),
+    removeSubnetValidator: (args: RemoveSubnetValidatorParams) => removeSubnetValidator(baseClient, args),
     getEthereumChain: () => getEthereumChain(baseClient),
     extractChainInfo: (args: ExtractChainInfoParams) => extractChainInfo(baseClient, args),
     getPChainBalance: () => getPChainBalance(baseClient),
@@ -137,9 +143,10 @@ export async function createCoreWalletClient(
  *   switch back after the P-Chain operation.
  */
 export async function ensureCoreNetworkMode(expectedTestnet: boolean): Promise<string | null> {
-  if (typeof window === 'undefined' || !window.avalanche) return null;
+  const provider = avalancheProvider();
+  if (!provider) return null;
 
-  const chain = await window.avalanche.request<GetEthereumChainResponse>({
+  const chain = await provider.request<GetEthereumChainResponse>({
     method: 'wallet_getEthereumChain',
     params: [],
   });
@@ -148,7 +155,7 @@ export async function ensureCoreNetworkMode(expectedTestnet: boolean): Promise<s
 
   // Switch to the matching C-Chain to toggle Core's mode
   const targetChainId = expectedTestnet ? '0xa869' : '0xa86a'; // 43113 / 43114
-  await window.avalanche.request({
+  await provider.request({
     method: 'wallet_switchEthereumChain',
     params: [{ chainId: targetChainId }],
   });
@@ -161,9 +168,10 @@ export async function ensureCoreNetworkMode(expectedTestnet: boolean): Promise<s
  * switched it.  Best-effort — silently swallows errors.
  */
 export async function restoreCoreChain(previousChainIdHex: string): Promise<void> {
-  if (typeof window === 'undefined' || !window.avalanche) return;
+  const provider = avalancheProvider();
+  if (!provider) return;
   try {
-    await window.avalanche.request({
+    await provider.request({
       method: 'wallet_switchEthereumChain',
       params: [{ chainId: previousChainIdHex }],
     });

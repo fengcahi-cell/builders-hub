@@ -1,6 +1,12 @@
 import { NextResponse } from 'next/server';
-import { createPChainClient } from '@avalanche-sdk/client';
-import { avalanche } from '@avalanche-sdk/client/chains';
+import {
+  HELICON_ACTIVATION,
+  MIN_STAKING_DAYS_PRE,
+  heliconActive,
+  minConsumptionRateAt,
+  minStakingDaysAt,
+} from '@/constants/helicon';
+import { EXPLORER_API_BASE } from '@/lib/pchain-explorer';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,30 +21,24 @@ const CONFIG = {
   network: {
     genesisSupply: 360_000_000, // 360M AVAX unlocked at genesis
     maxSupply: 720_000_000, // 720M AVAX maximum supply cap
-    minConsumptionRate: 0.10, // 10% for minimum staking duration
     maxConsumptionRate: 0.12, // 12% for maximum staking duration
     mintingPeriodDays: 365, // 1 year
-    minStakingDays: 14, // 2 weeks
     maxStakingDays: 365, // 1 year
+    // The Helicon-sensitive floor and minimum duration live in
+    // constants/helicon.ts, since this route plots a multi-year series and each
+    // point must use the parameters in effect on its own date.
   },
 
-  endpoints: {
-    dataApi: 'https://data-api.avax.network/v1/avax/supply',
-    metabase: 'https://ava-labs-inc.metabaseapp.com/api/public/dashboard/38ea69a5-e373-4258-9db6-8425fcba3a1a/dashcard/9955/card/13502?parameters=%5B%5D',
-  },
 } as const;
-
-const pChainClient = createPChainClient({
-  chain: avalanche,
-  transport: { type: 'http' },
-});
 
 interface APYDataPoint {
   date: string;
   timestamp: number;
   supply: number; // Supply used for APY calculation
   maxAPY: number; // APY for 1-year staking (max rate)
-  minAPY: number; // APY for 2-week staking (min rate)
+  minAPY: number; // APY for the minimum duration in effect (2 weeks, 2 days after Helicon)
+  twoWeekAPY: number; // APY for 2-week staking
+  twoDayAPY: number | null; // APY for 2-day staking, null before Helicon allowed it
 }
 
 interface CurrentData {
@@ -46,9 +46,13 @@ interface CurrentData {
   totalBurned: number;
   maxAPY: number;
   minAPY: number;
+  twoWeekAPY: number;
+  twoDayAPY: number | null;
 }
 
-interface MetabaseRow {
+type TermRates = Pick<APYDataPoint, 'maxAPY' | 'minAPY' | 'twoWeekAPY' | 'twoDayAPY'>;
+
+interface EmissionsRow {
   date: string;
   cumulativeEmissions: number;
 }
@@ -69,14 +73,14 @@ async function fetchWithTimeout(
 
 /**
  * Calculate Effective Consumption Rate based on staking duration.
- * The rate interpolates linearly between min and max based on how long you stake:
- * - 2 weeks (min): ~10.08% effective rate
+ * The rate interpolates linearly between the floor in effect at `at` and max:
+ * - minimum duration: ~= the floor
  * - 1 year (max): 12.00% effective rate
  */
-function getEffectiveConsumptionRate(stakingDays: number): number {
-  const { minConsumptionRate, maxConsumptionRate, mintingPeriodDays } = CONFIG.network;
+function getEffectiveConsumptionRate(stakingDays: number, at: number): number {
+  const { maxConsumptionRate, mintingPeriodDays } = CONFIG.network;
   const t = Math.min(1, Math.max(0, stakingDays / mintingPeriodDays));
-  return minConsumptionRate * (1 - t) + maxConsumptionRate * t;
+  return minConsumptionRateAt(at) * (1 - t) + maxConsumptionRate * t;
 }
 
 /**
@@ -84,64 +88,80 @@ function getEffectiveConsumptionRate(stakingDays: number): number {
  * Reward = (MaxSupply - Supply) × (Stake/Supply) × (StakingPeriod/MintingPeriod) × ECR
  * APY = (MaxSupply - Supply) / Supply × ECR × 100
  */
-function calculateAPY(supply: number, stakingDays: number): number {
+function calculateAPY(supply: number, stakingDays: number, at: number): number {
   if (supply <= 0 || supply >= CONFIG.network.maxSupply) return 0;
-  
+
   const remainingToMint = CONFIG.network.maxSupply - supply;
-  const effectiveRate = getEffectiveConsumptionRate(stakingDays);
+  const effectiveRate = getEffectiveConsumptionRate(stakingDays, at);
   const apy = (remainingToMint / supply) * effectiveRate * 100;
   
   return Math.max(0, Number(apy.toFixed(2)));
 }
 
+function termRates(supply: number, at: number): TermRates {
+  return {
+    maxAPY: calculateAPY(supply, CONFIG.network.maxStakingDays, at),
+    minAPY: calculateAPY(supply, minStakingDaysAt(at), at),
+    twoWeekAPY: calculateAPY(supply, MIN_STAKING_DAYS_PRE, at),
+    twoDayAPY: heliconActive(at) ? calculateAPY(supply, 2, at) : null,
+  };
+}
+
+/** The rates at the Helicon activation instant, the supply interpolated between the days around it. */
+function heliconPoint(history: APYDataPoint[]): APYDataPoint | null {
+  const at = HELICON_ACTIVATION.mainnet;
+  const i = history.findIndex((p) => p.timestamp * 1000 > at);
+  if (i <= 0) return null;
+  const a = history[i - 1];
+  const b = history[i];
+  const t = (at / 1000 - a.timestamp) / (b.timestamp - a.timestamp);
+  const supply = a.supply + (b.supply - a.supply) * t;
+  return {
+    date: new Date(at).toISOString().split('T')[0],
+    timestamp: Math.floor(at / 1000),
+    supply,
+    ...termRates(supply, at),
+  };
+}
+
 async function fetchPChainSupply(): Promise<number | null> {
   try {
-    // Get Primary Network supply (no subnetId needed for default)
-    const result = await pChainClient.getCurrentSupply({});
-    // Supply is returned as bigint in nanoAVAX, convert to AVAX
-    return Number(result.supply) / 1_000_000_000;
-  } catch (error) {
-    console.error('[fetchPChainSupply] SDK error:', error);
-    return null;
-  }
-}
-
-async function fetchDataApiDetails(): Promise<{ totalBurned: number } | null> {
-  try {
-    const response = await fetchWithTimeout(CONFIG.endpoints.dataApi, {
+    // Primary Network current supply from our own P-chain read API (served from
+    // ClickHouse) — replaces the @avalanche-sdk/client RPC call. currentSupply
+    // is nAVAX; the APY math works in AVAX.
+    const response = await fetchWithTimeout(`${EXPLORER_API_BASE}/api/mainnet/stats`, {
       headers: { Accept: 'application/json' },
     });
-
     if (!response.ok) return null;
     const data = await response.json();
-    const totalBurned = (parseFloat(data.totalPBurned) || 0) + (parseFloat(data.totalCBurned) || 0) + (parseFloat(data.totalXBurned) || 0);
-    return { totalBurned };
-  } catch {
+    return data?.currentSupply ? Number(data.currentSupply) / 1_000_000_000 : null;
+  } catch (error) {
+    console.error('[fetchPChainSupply] error:', error);
     return null;
   }
 }
 
-async function fetchHistoricalData(): Promise<MetabaseRow[]> {
+// Historical cumulative emissions from our metrics-api (cumulative staking
+// rewards reconstructed from reward UTXOs). Any constant accounting offset in
+// the series is absorbed below by alignmentOffset (the curve is shifted so its
+// latest point equals the real on-chain supply). Full history from 2020-10.
+async function fetchHistoricalData(): Promise<EmissionsRow[]> {
   try {
-    const response = await fetchWithTimeout(CONFIG.endpoints.metabase, {
-      headers: { Accept: 'application/json' },
-    });
-
+    const response = await fetchWithTimeout(
+      `${EXPLORER_API_BASE}/v2/networks/mainnet/metrics/cumulativeStakingRewards`,
+      { headers: { Accept: 'application/json' } },
+    );
     if (!response.ok) return [];
     const data = await response.json();
-    if (!data?.data?.rows || !Array.isArray(data.data.rows)) return [];
-    const rows: MetabaseRow[] = [];
-    for (const row of data.data.rows) {
-      const dateStr = row[0];
-      const emissions = row[1];    
-      if (!dateStr || typeof emissions !== 'number' || emissions <= 0) continue;
-
+    if (!Array.isArray(data?.results)) return [];
+    const rows: EmissionsRow[] = [];
+    for (const r of data.results as { value: number; timestamp: number }[]) {
+      if (typeof r.value !== 'number' || r.value <= 0) continue;
       rows.push({
-        date: dateStr.split('T')[0],
-        cumulativeEmissions: emissions,
+        date: new Date(r.timestamp * 1000).toISOString().split('T')[0],
+        cumulativeEmissions: r.value,
       });
     }
-
     rows.sort((a, b) => a.date.localeCompare(b.date));
     return rows;
   } catch {
@@ -151,9 +171,8 @@ async function fetchHistoricalData(): Promise<MetabaseRow[]> {
 
 export async function GET() {
   try {
-    const [pChainSupply, dataApiDetails, historicalData] = await Promise.all([
+    const [pChainSupply, historicalData] = await Promise.all([
       fetchPChainSupply(),
-      fetchDataApiDetails(),
       fetchHistoricalData(),
     ]);
 
@@ -165,27 +184,31 @@ export async function GET() {
     }
 
     const currentSupply = pChainSupply ?? CONFIG.network.genesisSupply;
+    const nowMs = Date.now();
     const current: CurrentData = {
       supply: currentSupply,
-      totalBurned: dataApiDetails?.totalBurned ?? 0,
-      maxAPY: calculateAPY(currentSupply, CONFIG.network.maxStakingDays),
-      minAPY: calculateAPY(currentSupply, CONFIG.network.minStakingDays),
+      // Total-burned came from Glacier (data-api /v1/avax/supply), now removed.
+      // Not currently served by our own data; 0 until we surface it (display-only,
+      // not used in the APY calculation).
+      totalBurned: 0,
+      ...termRates(currentSupply, nowMs),
     };
 
     let apyHistory: APYDataPoint[] = [];
 
     if (historicalData.length > 0 && pChainSupply) {
-      const latestMetabase = historicalData[historicalData.length - 1];
-      const metabaseLatestSupply = CONFIG.network.genesisSupply + latestMetabase.cumulativeEmissions;
-      const alignmentOffset = pChainSupply - metabaseLatestSupply;
+      const latestRow = historicalData[historicalData.length - 1];
+      const seriesLatestSupply = CONFIG.network.genesisSupply + latestRow.cumulativeEmissions;
+      const alignmentOffset = pChainSupply - seriesLatestSupply;
       apyHistory = historicalData.map((row) => {
         const supply = CONFIG.network.genesisSupply + row.cumulativeEmissions + alignmentOffset;
+        // Each point is priced with the parameters in effect on its own date.
+        const at = new Date(row.date).getTime();
         return {
           date: row.date,
-          timestamp: Math.floor(new Date(row.date).getTime() / 1000),
+          timestamp: Math.floor(at / 1000),
           supply,
-          maxAPY: calculateAPY(supply, CONFIG.network.maxStakingDays),
-          minAPY: calculateAPY(supply, CONFIG.network.minStakingDays),
+          ...termRates(supply, at),
         };
       });
 
@@ -193,16 +216,13 @@ export async function GET() {
       const lastPoint = apyHistory[apyHistory.length - 1];
 
       if (lastPoint.date === today) {
-        lastPoint.supply = currentSupply;
-        lastPoint.maxAPY = current.maxAPY;
-        lastPoint.minAPY = current.minAPY;
+        Object.assign(lastPoint, termRates(currentSupply, nowMs), { supply: currentSupply });
       } else {
         apyHistory.push({
           date: today,
           timestamp: Math.floor(Date.now() / 1000),
           supply: currentSupply,
-          maxAPY: current.maxAPY,
-          minAPY: current.minAPY,
+          ...termRates(currentSupply, nowMs),
         });
       }
     }
@@ -210,12 +230,15 @@ export async function GET() {
     const response = {
       data: apyHistory,
       current,
+      // A sample at the upgrade instant itself (not in `data`), where the 2-day term begins.
+      helicon: heliconPoint(apyHistory),
       constants: {
         genesisSupply: CONFIG.network.genesisSupply,
         maxSupply: CONFIG.network.maxSupply,
-        minConsumptionRate: CONFIG.network.minConsumptionRate,
+        // What applies right now, not the pre-Helicon baseline.
+        minConsumptionRate: minConsumptionRateAt(nowMs),
         maxConsumptionRate: CONFIG.network.maxConsumptionRate,
-        minStakingDuration: '2 weeks',
+        minStakingDuration: heliconActive(nowMs) ? '48 hours' : '2 weeks',
         maxStakingDuration: '1 year',
       },
     };

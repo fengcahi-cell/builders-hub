@@ -1,6 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { ConsoleLog } from '@/types/console-log';
-import { useConsoleBadgeNotificationStore } from '@/stores/consoleBadgeNotificationStore';
 
 /**
  * Hook for managing console log/history
@@ -66,16 +65,12 @@ export const useConsoleLog = (autoFetch: boolean = false) => {
         body: JSON.stringify({
           status: item.status,
           actionPath: item.actionPath,
-          data: item.data,
-          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+          data: item.data
         })
       });
 
       if (response.ok) {
         const savedItem = await response.json();
-        if (savedItem.awardedBadges?.length > 0) {
-          useConsoleBadgeNotificationStore.getState().addBadges(savedItem.awardedBadges);
-        }
         const logItem: ConsoleLog = {
           id: savedItem.id,
           timestamp: new Date(savedItem.created_at),
@@ -97,14 +92,11 @@ export const useConsoleLog = (autoFetch: boolean = false) => {
 
   // Helper function to get explorer URL
   const getExplorerUrl = (id: string, type: 'tx' | 'address', network: string, chain: string = 'P'): string => {
-    const base = network === 'mainnet' 
-      ? 'https://subnets.avax.network' 
-      : 'https://subnets-test.avax.network';
-    
     if (chain === 'P') {
-      return `${base}/p-chain/${type}/${id}`;
+      return `/explorer/${network === 'mainnet' ? 'mainnet' : 'fuji'}/p-chain/${type}/${id}`;
     }
-    return `${base}/c-chain/${type}/${id}`;
+    // Both C-Chains are served by our own explorer now.
+    return `/explorer/${network === 'mainnet' ? 'mainnet' : 'fuji'}/c-chain/${type}/${id}`;
   };
 
   return {

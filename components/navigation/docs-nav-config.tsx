@@ -11,12 +11,12 @@ import {
   CircleDollarSign,
   Package,
   Terminal,
-  Milestone,
   Book,
   Eye,
   Bot,
   AppWindow,
-  Cloud
+  Cloud,
+  ShieldCheck
 } from 'lucide-react';
 
 export type NavOption = {
@@ -124,6 +124,13 @@ export const toolingOptions: NavOption[] = [
     url: '/console',
   },
   {
+    title: 'Contract Verification',
+    description: 'Verify contracts on any L1 from Hardhat or Foundry',
+    badge: 'New',
+    icon: <ShieldCheck className="w-5 h-5" />,
+    url: '/docs/tooling/contract-verification',
+  },
+  {
     title: 'Platform CLI',
     description: 'P-Chain operations: staking, subnets, transfers',
     badge: 'New',
@@ -149,35 +156,15 @@ export const toolingOptions: NavOption[] = [
     icon: <Network className="w-5 h-5" />,
     url: '/docs/tooling/tmpnet',
   },
-  {
-    title: 'Interchain Kit',
-    description: 'Local toolkit for testing ICM & ICTT',
-    badge: 'New',
-    icon: <Cable className="w-5 h-5" />,
-    url: '/docs/tooling/interchain-kit',
-  },
-  {
-    title: "Postman Collection",
-    description: 'Postman collection for Avalanche APIs',
-    icon: <Milestone className="w-5 h-5" />,
-    url: '/docs/tooling/avalanche-postman',
-  },
-  {
-    title: 'Avalanche-CLI',
-    description: 'Command-line interface for Avalanche',
-    badge: 'Deprecated',
-    icon: <Terminal className="w-5 h-5" />,
-    url: '/docs/tooling/avalanche-cli',
-  },
 ];
 
 
 export const acpsOptions: NavOption[] = [
   {
-    title: 'Streaming Asynchronous Execution',
+    title: 'Continuous Execution',
     description: 'ACP-194',
     icon: <Book className="w-5 h-5" />,
-    url: '/docs/acps/194-streaming-asynchronous-execution',
+    url: '/docs/acps/194-continuous-execution',
   },
   {
     title: 'Auto-Renewed Staking',

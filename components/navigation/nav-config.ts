@@ -12,7 +12,11 @@
 export interface NavItem {
   text: string;
   href: string;
+  /** Small "New" style pill next to the label (drop after launch month). */
+  badge?: string;
   external?: boolean;
+  /** Picture under public/: the item renders as a picture card instead of a text row. */
+  image?: string;
 }
 
 export interface NavSection {
@@ -27,90 +31,55 @@ export interface NavSection {
  */
 export const menuSections: NavSection[] = [
   {
-    title: 'Academy',
-    href: '/academy',
+    title: 'Solutions',
+    href: '/solutions',
     items: [
-      { text: 'Avalanche L1 Academy', href: '/academy/avalanche-l1' },
-      { text: 'Entrepreneur Academy', href: '/academy/entrepreneur' },
-      { text: 'Blockchain Academy', href: '/academy/blockchain' },
+      { text: 'Why Avalanche', href: '/solutions', image: '/nav/solutions.webp' },
+      { text: 'Interoperability', href: '/solutions/interoperability' },
+      { text: 'Performance', href: '/solutions/performance' },
+      { text: 'Privacy', href: '/solutions/privacy' },
+      { text: 'Compliance', href: '/solutions/compliance' },
     ],
   },
   {
-    title: 'Documentation',
+    title: 'Developers',
     href: '/docs/primary-network',
     items: [
-      { text: 'Primary Network', href: '/docs/primary-network' },
-      { text: 'Nodes & Validators', href: '/docs/nodes' },
-      { text: 'Data APIs', href: '/docs/api-reference/data-api' },
-      { text: 'ACPs', href: '/docs/acps' },
-      { text: 'Developer Tools', href: '/docs/tooling' },
+      { text: 'Documentation', href: '/docs/primary-network', image: '/nav/documentation.webp' },
+      { text: 'Academy', href: '/academy', image: '/nav/academy-fundamentals.webp' },
     ],
   },
   {
-    title: 'Chat',
-    href: '/chat',
-    items: [
-      { text: 'Ask AI', href: '/chat' },
-    ],
-  },
-  {
+    // The faucet is the most tapped link of the phone menu, so it gets the second card.
     title: 'Console',
     href: '/console',
     items: [
-      { text: 'Console', href: '/console' },
-      { text: 'Interchain Messaging Tools', href: '/console/icm/setup' },
-      { text: 'Interchain Token Transfer Tools', href: '/console/ictt/setup' },
-      { text: 'Testnet Faucet', href: '/console/primary-network/faucet' },
+      { text: 'Console', href: '/console', image: '/nav/console.webp' },
+      { text: 'Testnet Faucet', href: '/console/primary-network/faucet', image: '/nav/faucet.webp' },
     ],
   },
   {
-    title: 'Events',
-    href: '/events',
+    title: 'Explorer',
+    href: '/explorer/mainnet',
     items: [
-      { text: 'Hackathons', href: '/events' },
-      { text: 'Avalanche Summit', href: 'https://www.avalanchesummit.com', external: true  },
-      { text: 'Community Driven Events', href: 'https://lu.ma/Team1?utm_source=builder_hub', external: true },
-      { text: 'Campus Connect', href: '/university' },
-    ],
-  },
-  {
-    title: 'Grants',
-    href: '/grants',
-    items: [
-{ text: 'Retro9000', href: 'https://retro9000.avax.network', external: true },
-      { text: 'Call for Research Proposals', href: '/grants/avalanche-research-proposals' },
-      { text: 'Blizzard Fund', href: 'https://www.blizzard.fund/', external: true },
-    ],
-  },
-  {
-    title: 'Blog',
-    href: '/guides',
-    items: [
-      { text: 'Latest Articles', href: '/guides' },
-      { text: 'Browse All Posts', href: '/guides' },
-    ],
-  },
-  {
-    title: 'Stats',
-    href: '/stats/overview',
-    items: [
-      { text: 'Playground', href: '/stats/playground' },
-      { text: 'Avalanche L1s', href: '/stats/overview' },
-      { text: 'C-Chain', href: '/stats/l1/c-chain' },
-      { text: 'Validators', href: '/stats/validators' },
+      { text: 'Block Explorer', href: '/explorer/mainnet', image: '/nav/explorer.webp' },
+      { text: 'Query', href: '/explorer/mainnet/query' },
+      { text: 'C-Chain Explorer', href: '/explorer/mainnet/c-chain' },
+      { text: 'Validators', href: '/explorer/mainnet/p-chain/validators' },
       { text: 'Validator Alerts', href: '/validator-alerts' },
     ],
   },
   {
-    title: 'Integrations',
-    href: '/integrations',
+    // The card opens the /ecosystem overview, which lists the links this section leaves out.
+    // One-word labels fit the column beside the card on a 360px phone.
+    title: 'Ecosystem',
+    href: '/ecosystem',
     items: [
-      { text: 'Wallet SDKs', href: '/integrations#Wallet%20SDKs' },
-      { text: 'Block Explorers', href: '/integrations#Block%20Explorers' },
-      { text: 'Blockchain-as-a-Service', href: '/integrations#Blockchain%20as%20a%20Service' },
-      { text: 'Data Feeds', href: '/integrations#Data%20Feeds' },
-      { text: 'Indexers', href: '/integrations#Indexers' },
-      { text: 'Browse All Integrations', href: '/integrations' },
+      { text: 'Overview', href: '/ecosystem', image: '/nav/ecosystem.webp' },
+      { text: 'Events', href: '/events' },
+      { text: 'Grants', href: '/grants' },
+      { text: 'Audits', href: '/audits', badge: 'New' },
+      { text: 'Integrations', href: '/integrations' },
     ],
   },
 ];
@@ -119,6 +88,4 @@ export const menuSections: NavSection[] = [
  * Single navigation items (no dropdown)
  * These appear as simple links in both mobile and desktop navigation
  */
-export const singleItems: NavItem[] = [
-  { text: 'Explorer', href: '/explorer' },
-];
+export const singleItems: NavItem[] = [];

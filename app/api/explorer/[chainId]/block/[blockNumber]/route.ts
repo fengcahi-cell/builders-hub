@@ -1,5 +1,7 @@
 import { NextResponse } from 'next/server';
 import l1ChainsData from '@/constants/l1-chains.json';
+import { assertPublicRpcTarget } from '@/lib/rpcUrlValidator';
+import { sumFeesWei } from '@/lib/evm-burn';
 
 interface RpcTransaction {
   hash: string;
@@ -171,9 +173,16 @@ export async function GET(
   const { searchParams } = new URL(request.url);
   const customRpcUrl = searchParams.get('rpcUrl');
 
+  if (customRpcUrl && !(await assertPublicRpcTarget(customRpcUrl))) {
+    return NextResponse.json(
+      { error: 'Invalid rpcUrl: must use https and must not target private or loopback addresses.' },
+      { status: 400 }
+    );
+  }
+
   const chain = l1ChainsData.find(c => c.chainId === chainId);
   const rpcUrl = chain?.rpcUrl || customRpcUrl;
-  
+
   if (!rpcUrl) {
     return NextResponse.json({ error: 'Chain not found or RPC URL missing. Provide rpcUrl query parameter for custom chains.' }, { status: 404 });
   }
@@ -208,13 +217,9 @@ export async function GET(
       const receipts = await Promise.all(receiptPromises);
       
       // Sum up all transaction fees: gasUsed * effectiveGasPrice
-      for (const receipt of receipts) {
-        if (receipt && receipt.gasUsed && receipt.effectiveGasPrice) {
-          const gasUsed = BigInt(receipt.gasUsed);
-          const effectiveGasPrice = BigInt(receipt.effectiveGasPrice);
-          totalGasFeeWei += gasUsed * effectiveGasPrice;
-        }
-      }
+      totalGasFeeWei = sumFeesWei(
+        receipts.filter((r): r is RpcTransactionReceipt => !!r && !!r.gasUsed && !!r.effectiveGasPrice),
+      );
       
       // Convert from wei to native token (divide by 1e18)
       gasFee = (Number(totalGasFeeWei) / 1e18).toFixed(6);

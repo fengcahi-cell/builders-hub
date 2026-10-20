@@ -38,7 +38,7 @@ export function isReferralTargetType(value: unknown): value is ReferralTargetTyp
 export function getDefaultReferralDestination(targetType: ReferralTargetType): string {
   switch (targetType) {
     case "bh_signup":
-      return "/";
+      return "/signup";
     case "hackathon_registration":
       return "/events/registration-form";
     case "build_games_application":
@@ -332,6 +332,9 @@ async function recordCodeBasedAttribution({
   }
 
   const { userId, userEmail } = await resolveSubmitterId(input.userId, input.userEmail);
+
+  // Prevent self-referral: a user cannot credit themselves for their own conversion.
+  if (userId && referralLink.owner_user_id === userId) return null;
   const attributionKey = buildAttributionKey({
     targetType: input.targetType,
     targetId,

@@ -1,0 +1,36 @@
+import { NextRequest, NextResponse } from "next/server";
+import { getVerifiedContractResolvingProxies } from "@/lib/sourcify";
+
+// Same-origin proxy for Sourcify contract verification, proxy-aware: an
+// EIP-1967/1167 proxy comes back with its implementation's ABI merged in,
+// so method decoding works on delegated calls. The client asks this route
+// (never sourcify.dev directly) so responses ride the CDN: plain verified
+// contracts are effectively immutable and cache long; proxy-resolved ones
+// cache shorter (the implementation can be upgraded); a miss caches short,
+// because verification can land at any moment.
+
+const HIT_CACHE = "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
+const PROXY_CACHE = "public, max-age=1800, s-maxage=3600, stale-while-revalidate=86400";
+// A miss is the one answer here that flips on a user's own action, so the
+// browser must never hold onto it: someone who verifies a contract and
+// returns to its page would otherwise be told it is unverified for as long
+// as the cache lasts. The CDN still absorbs bursts, briefly.
+const MISS_CACHE = "public, max-age=0, s-maxage=60";
+
+export async function GET(
+  _req: NextRequest,
+  { params }: { params: Promise<{ chainId: string; address: string }> },
+) {
+  const { chainId, address } = await params;
+  const id = Number(chainId);
+  const contract = await getVerifiedContractResolvingProxies(id, address);
+  // a miss is an answer, not an error: a 404 here put one console error on a
+  // page for every unverified contract it named
+  if (!contract) {
+    return NextResponse.json({ verified: false }, { headers: { "Cache-Control": MISS_CACHE } });
+  }
+  return NextResponse.json(
+    { verified: true, ...contract },
+    { headers: { "Cache-Control": contract.proxy ? PROXY_CACHE : HIT_CACHE } },
+  );
+}

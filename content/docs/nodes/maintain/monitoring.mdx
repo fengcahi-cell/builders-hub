@@ -7,7 +7,7 @@ This tutorial demonstrates how to set up infrastructure to monitor an instance o
 
 - [Prometheus](https://prometheus.io/) to gather and store data
 - [`node_exporter`](https://github.com/prometheus/node_exporter) to get information about the machine,
-- AvalancheGo's [Metrics API](/docs/api-reference/metrics-api) to get information about the node
+- AvalancheGo's [Metrics RPC](/docs/rpcs/other/metrics-rpc) (`/ext/metrics`) to get information about the node
 - [Grafana](https://grafana.com/) to visualize data on a dashboard.
 - A set of pre-made [Avalanche dashboards](https://github.com/ava-labs/avalanche-monitoring/tree/main/grafana/dashboards)
 
@@ -21,13 +21,13 @@ This page covers how to *collect* metrics. Once you're set up, see [Key Metrics 
 - Shell access to the machine running the node
 - Administrator privileges on the machine
 
-This tutorial assumes you have Ubuntu 20.04 or later running on your node. Other Linux flavors that use `systemd` for running services and `apt-get` for package management might work but have not been tested. Community members have reported it works on Debian 10 and later versions.
+This tutorial assumes that your node runs Ubuntu 22.04 or 24.04, the versions that the AvalancheGo README supports. Other Linux distributions that use `systemd` for services and `apt-get` for packages can work, but we did not test them.
 
 ### Caveat: Security
 
 The system as described here **should not** be opened to the public internet. Neither Prometheus nor Grafana as shown here is hardened against unauthorized access. Make sure that both of them are accessible only over a secured proxy, local network, or VPN. Setting that up is beyond the scope of this tutorial, but exercise caution. Bad security practices could lead to attackers gaining control over your node! It is your responsibility to follow proper security practices.
 
-Monitoring Installer Script[​](#monitoring-installer-script "Direct link to heading")
+Monitoring Installer Script
 -------------------------------------------------------------------------------------
 
 In order to make node monitoring easier to install, we have made a script that does most of the work for you. To download and run the script, log into the machine the node runs on with a user that has administrator privileges and enter the following command:
@@ -63,7 +63,7 @@ Run without any options, script will download and install latest version of Aval
 
 Let's get to it.
 
-Step 1: Set up Prometheus [​](#step-1-set-up-prometheus- "Direct link to heading")
+Step 1: Set up Prometheus
 ----------------------------------------------------------------------------------
 
 Run the script to execute the first step:
@@ -121,7 +121,7 @@ You may need to do `sudo ufw allow 9090/tcp` if the firewall is on, and/or adjus
 
 If everything is OK, let's move on.
 
-Step 2: Install Grafana [​](#step-2-install-grafana- "Direct link to heading")
+Step 2: Install Grafana
 ------------------------------------------------------------------------------
 
 Run the script to execute the second step:
@@ -162,7 +162,7 @@ You may need to do `sudo ufw allow 3000/tcp` if the firewall is on, and/or adjus
 
 Prometheus and Grafana are now installed, we're ready for the next step.
 
-Step 3: Set up `node_exporter` [​](#step-3-set-up-node_exporter- "Direct link to heading")
+Step 3: Set up `node_exporter`
 ------------------------------------------------------------------------------------------
 
 In addition to metrics from AvalancheGo, let's set up monitoring of the machine itself, so we can check CPU, memory, network and disk usage and be aware of any anomalies. For that, we will use `node_exporter`, a Prometheus plugin.
@@ -222,7 +222,7 @@ Mind the spacing (leading spaces too)! You will need admin privileges to do that
 
 All that's left to do now is to provision the data source and install the actual dashboards that will show us the data.
 
-Step 4: Dashboards [​](#step-4-dashboards- "Direct link to heading")
+Step 4: Dashboards
 --------------------------------------------------------------------
 
 Run the script to install the dashboards:
@@ -271,7 +271,7 @@ Some graphs may take some time to populate fully, as they need a series of data 
 
 You can bookmark the main dashboard as it shows the most important information about the node at a glance. Every dashboard has a link to all the others as the first row, so you can move between them easily.
 
-Step 5: Additional Dashboards (Optional)[​](#step-5-additional-dashboards-optional "Direct link to heading")
+Step 5: Additional Dashboards (Optional)
 ------------------------------------------------------------------------------------------------------------
 
 Step 4 installs the basic set of dashboards that make sense to have on any node. Step 5 is for installing additional dashboards that may not be useful for every installation.
@@ -282,33 +282,9 @@ Currently, there is only one additional dashboard: Avalanche L1s. If your node i
 ./monitoring-installer.sh --5
 ```
 
-This will add the Avalanche L1s dashboard. It allows you to monitor operational data for any Avalanche L1 that is synced on the node. There is an Avalanche L1 switcher that allows you to switch between different Avalanche L1s. As there are many Avalanche L1s and not every node will have all of them, by default, it comes populated only with Spaces and WAGMI Avalanche L1s that exist on Fuji testnet:
+This adds the L1 dashboard. Its title in Grafana is `Subnets`. It shows operational data for each chain that the node syncs. Use the `Chain` selector at the top of the dashboard to select a chain. The selector reads the `chain` label of the node metrics from Prometheus, so it lists every chain that the node runs. You do not need to edit the dashboard.
 
-![Avalanche L1s switcher](/images/monitoring3.png)
-
-To configure the dashboard and add any Layer 1s that your node is syncing, you will need to edit the dashboard. Select the `dashboard settings` icon (image of a cog) in the upper right corner of the dashboard display and switch to `Variables` section and select the `subnet` variable. It should look something like this:
-
-![Variables screen](/images/monitoring4.png)
-
-The variable format is:
-
-```bash
-L1 name:<BlockchainID>
-```
-
-and the separator between entries is a comma. Entries for Spaces and WAGMI look like:
-
-```bash
-Spaces (Fuji) : 2ebCneCbwthjQ1rYT41nhd7M76Hc6YmosMAQrTFhBq8qeqh6tt, WAGMI (Fuji) : 2AM3vsuLoJdGBGqX2ibE8RGEq4Lg7g4bot6BT1Z7B9dH5corUD
-```
-
-<Callout title="Note">
-The dashboard variable is still named `subnet` for backward compatibility, but it represents Avalanche L1 blockchains.
-</Callout>
-
-After editing the values, press `Update` and then click `Save dashboard` button and confirm. Press the back arrow in the upper left corner to return to the dashboard. New values should now be selectable from the dropdown and data for the selected Avalanche L1 will be shown in the panels.
-
-Updating[​](#updating "Direct link to heading")
+Updating
 -----------------------------------------------
 
 Available node metrics are updated constantly, new ones are added and obsolete removed, so it is good a practice to update the dashboards from time to time, especially if you notice any missing data in panels. Updating the dashboards is easy, just run the script with no arguments, and it will refresh the dashboards with the latest available versions. Allow up to 30s for dashboards to update in Grafana.
@@ -323,7 +299,7 @@ If you added the optional extra dashboards (step 5), they will be updated as wel
 If you're experiencing broken or missing metrics in your dashboards, running an update is the recommended first step. The dashboards are regularly updated with new metrics and fixes. Recent updates include MeterVM metrics for C-Chain, improved trie operation metrics, and consolidated chain dashboards.
 </Callout>
 
-Advanced Dashboards[​](#advanced-dashboards "Direct link to heading")
+Advanced Dashboards
 ---------------------------------------------------------------------
 
 The [avalanche-monitoring repository](https://github.com/ava-labs/avalanche-monitoring/tree/main/grafana/dashboards) contains additional dashboards that are not installed by the script but can be manually imported into Grafana:
@@ -353,7 +329,7 @@ To use this dashboard, you must:
 2. Add Loki as a data source in Grafana
 3. Import the `logs.json` dashboard from the repository
 
-Summary[​](#summary "Direct link to heading")
+Summary
 ---------------------------------------------
 
 Using the script to install node monitoring is easy, and it gives you insight into how your node is behaving and what's going on under the hood. Also, pretty graphs!

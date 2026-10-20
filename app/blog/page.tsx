@@ -9,10 +9,10 @@ export const metadata: Metadata = createMetadata({
   description:
     "Takeaways and tutorials from building a network of fast, efficient, highly-optimized chains.",
   openGraph: {
-    images: "/api/og/blog",
+    images: "/api/og/blog?v=2",
   },
   twitter: {
-    images: "/api/og/blog",
+    images: "/api/og/blog?v=2",
   },
 });
 
@@ -45,6 +45,7 @@ export default function Page(): React.ReactElement {
       <HeroBackground />
       <main className="relative py-12 sm:py-16">
         <div className="mx-auto max-w-7xl px-6 lg:px-8">
+          <h1 className="sr-only">Blog</h1>
           {/* Blog List with Search */}
           <BlogList blogs={blogs} />
         </div>

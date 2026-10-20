@@ -94,6 +94,17 @@ export async function POST(req: NextRequest) {
       }, { status: 404 });
     }
 
+    // Verify the user has actually completed this course before issuing a certificate.
+    // getCompletedCourseSlugs reads approved UserBadge records — a user cannot
+    // self-issue one of those without also passing the badge assignment checks.
+    const completedSlugs = await getCompletedCourseSlugs(session.user.id);
+    if (!completedSlugs.includes(courseId)) {
+      return NextResponse.json(
+        { error: 'Course not completed. Finish the course to earn your certificate.' },
+        { status: 403 }
+      );
+    }
+
     const userName = sanitizeForWinAnsi(
       session.user.name || session.user.email || 'BuilderHub User'
     );
@@ -108,41 +119,25 @@ export async function POST(req: NextRequest) {
     const pdfDoc = await PDFDocument.load(templateArrayBuffer);
     const form = pdfDoc.getForm();
 
-    const isAvalancheTemplate = templateUrl.includes('AvalancheAcademy_Certificate.pdf');
-
     try {
-      if (isAvalancheTemplate) {
-        // Original 4-field flow for Avalanche certificates
-        form.getTextField('FullName').setText(userName);
-        form.getTextField('Class').setText(courseName);
-        form
-          .getTextField('Awarded')
-          .setText(
-            new Date().toLocaleDateString('en-US', {
-              day: 'numeric',
-              month: 'short',
-              year: 'numeric',
-            })
-          );
-        form
-          .getTextField('Id')
-          .setText(
-            Math.random().toString(36).substring(2, 15) +
-            Math.random().toString(36).substring(2, 15)
-          );
-      } else {
-        // Codebase Entrepreneur certificates: only Name and Date
-        form.getTextField('Enter Name').setText(userName);
-        form
-          .getTextField('Enter Date')
-          .setText(
-            new Date().toLocaleDateString('en-US', {
-              day: 'numeric',
-              month: 'short',
-              year: 'numeric',
-            })
-          );
-      }
+      // Every course uses the Avalanche Academy template and its four fields.
+      form.getTextField('FullName').setText(userName);
+      form.getTextField('Class').setText(courseName);
+      form
+        .getTextField('Awarded')
+        .setText(
+          new Date().toLocaleDateString('en-US', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric',
+          })
+        );
+      form
+        .getTextField('Id')
+        .setText(
+          Math.random().toString(36).substring(2, 15) +
+          Math.random().toString(36).substring(2, 15)
+        );
     } catch (error) {
       throw new Error('Failed to fill form fields');
     }
@@ -150,12 +145,10 @@ export async function POST(req: NextRequest) {
     form.flatten();
     const pdfBytes = await pdfDoc.save();
     
-    // Trigger HubSpot webhook for certificate completion
-    // At this point we know email exists due to the check above
-    // Include the current courseId since badge assignment may not have persisted yet
-    const completedBefore = await getCompletedCourseSlugs(session.user.id);
-    const isNewCompletion = !completedBefore.includes(courseId);
-    const completedCourses = [...completedBefore];
+    // Trigger HubSpot webhook for certificate completion.
+    // completedSlugs was already fetched above; courseId is guaranteed to be in it.
+    const isNewCompletion = !completedSlugs.includes(courseId);
+    const completedCourses = [...completedSlugs];
     if (isNewCompletion) {
       completedCourses.push(courseId);
     }

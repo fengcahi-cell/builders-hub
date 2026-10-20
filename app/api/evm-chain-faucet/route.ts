@@ -6,8 +6,6 @@ import { getAuthSession } from '@/lib/auth/authSession';
 import { checkAndReserveFaucetClaim, completeFaucetClaim, cancelFaucetClaim } from '@/lib/faucet/rateLimit';
 import { withChainLock, getNextNonce, withNonceRetry } from '@/lib/faucet/nonceManager';
 import { getL1ListStore, type L1ListItem } from '@/components/toolbox/stores/l1ListStore';
-import { checkAndAwardConsoleBadges } from '@/server/services/consoleBadge/consoleBadgeService';
-import type { AwardedConsoleBadge } from '@/server/services/consoleBadge/types';
 
 const SERVER_PRIVATE_KEY = process.env.FAUCET_C_CHAIN_PRIVATE_KEY;
 const FAUCET_ADDRESS = process.env.FAUCET_C_CHAIN_ADDRESS;
@@ -96,9 +94,10 @@ async function transferEVMTokens(
   });
 }
 
-export async function GET(request: NextRequest): Promise<NextResponse> {
+export async function POST(request: NextRequest): Promise<NextResponse> {
+  // A state-changing request must be a POST. Reading the parameters from JSON
   let claimId: string | null = null;
-  
+
   try {
     const session = await getAuthSession();
     if (!session?.user?.id) {
@@ -115,9 +114,21 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       );
     }
 
-    const searchParams = request.nextUrl.searchParams;
-    const destinationAddress = searchParams.get('address');
-    const chainIdParam = searchParams.get('chainId');
+    let body: { address?: unknown; chainId?: unknown };
+    try {
+      body = await request.json();
+    } catch {
+      return NextResponse.json(
+        { success: false, message: 'Invalid request body' },
+        { status: 400 }
+      );
+    }
+
+    const destinationAddress = typeof body.address === 'string' ? body.address : null;
+    const chainIdParam =
+      typeof body.chainId === 'string' || typeof body.chainId === 'number'
+        ? String(body.chainId)
+        : null;
 
     if (!destinationAddress) {
       return NextResponse.json(
@@ -193,10 +204,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
     await completeFaucetClaim(claimId, tx.txHash);
 
-    let awardedBadges: AwardedConsoleBadge[] = [];
-    try { awardedBadges = await checkAndAwardConsoleBadges(session.user.id, 'faucet_claim'); }
-    catch (e) { console.error('Badge check failed:', e); }
-
     return NextResponse.json({
       success: true,
       txHash: tx.txHash,
@@ -204,7 +211,6 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       destinationAddress,
       amount: dripAmount,
       chainId: parsedChainId,
-      awardedBadges,
     });
 
   } catch (error) {

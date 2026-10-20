@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { createMetadata } from "@/utils/metadata";
 import { AcademyLayout } from "@/components/academy/shared/academy-layout";
+import { COURSE_STATS } from "@/lib/academy/course-stats.generated";
 import { team1AcademyLandingPageConfig } from "./config";
 import { Suspense } from "react";
 import { getAuthSession } from "@/lib/auth/authSession";
@@ -15,7 +16,7 @@ export const metadata: Metadata = createMetadata({
   openGraph: {
     url: "/academy/team1",
     images: {
-      url: "/api/og/academy",
+      url: "/api/og/academy?v=2",
       width: 1200,
       height: 630,
       alt: "Team1 Academy",
@@ -23,7 +24,7 @@ export const metadata: Metadata = createMetadata({
   },
   twitter: {
     images: {
-      url: "/api/og/academy",
+      url: "/api/og/academy?v=2",
       width: 1200,
       height: 630,
       alt: "Team1 Academy",
@@ -47,6 +48,7 @@ export default async function Team1AcademyPage(): Promise<React.ReactElement> {
     );
   }
 
+  const courseStats = COURSE_STATS["team1"];
   return (
     <Suspense
       fallback={
@@ -55,7 +57,7 @@ export default async function Team1AcademyPage(): Promise<React.ReactElement> {
         </div>
       }
     >
-      <AcademyLayout config={team1AcademyLandingPageConfig} />
+      <AcademyLayout config={team1AcademyLandingPageConfig} courseStats={courseStats} />
     </Suspense>
   );
 }

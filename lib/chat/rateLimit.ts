@@ -14,6 +14,12 @@ interface RateLimitEntry {
   windowStart: number;
 }
 
+/** a limit per anonymous IP and per signed-in user; windows of an hour at most, which the cleanup assumes */
+export interface RateLimits {
+  anonymous: { maxRequests: number; windowMs: number };
+  authenticated: { maxRequests: number; windowMs: number };
+}
+
 interface RateLimitResult {
   allowed: boolean;
   remaining: number;
@@ -22,7 +28,7 @@ interface RateLimitResult {
 }
 
 // Rate limit configuration
-const RATE_LIMITS = {
+const RATE_LIMITS: RateLimits = {
   anonymous: {
     maxRequests: 10,
     windowMs: 60 * 60 * 1000, // 1 hour
@@ -31,7 +37,7 @@ const RATE_LIMITS = {
     maxRequests: 1000,
     windowMs: 60 * 60 * 1000, // 1 hour
   },
-} as const;
+};
 
 // In-memory storage for rate limits
 // Key format: "anon:{ip}" or "auth:{userId}"
@@ -56,32 +62,16 @@ function cleanupOldEntries(): void {
   lastCleanup = now;
 }
 
-/**
- * Extract client IP address from request headers
- * Handles various proxy configurations (Cloudflare, Vercel, nginx, etc.)
- */
-export function getClientIP(request: Request): string {
-  const headers = request.headers;
+export { getClientIP } from '@/lib/net/clientIp';
 
-  // Cloudflare
-  const cfConnectingIP = headers.get('cf-connecting-ip');
-  if (cfConnectingIP) return cfConnectingIP;
 
-  // Vercel / standard proxy
-  const xForwardedFor = headers.get('x-forwarded-for');
-  if (xForwardedFor) {
-    // x-forwarded-for can contain multiple IPs: "client, proxy1, proxy2"
-    // The first one is the original client
-    const firstIP = xForwardedFor.split(',')[0].trim();
-    if (firstIP) return firstIP;
-  }
-
-  // Generic proxy
-  const xRealIP = headers.get('x-real-ip');
-  if (xRealIP) return xRealIP;
-
-  // Fallback - this might be the load balancer IP in production
-  return 'unknown';
+/** the loopback address in any of the spellings a dev server forwards, port included */
+function isLoopback(identifier: string): boolean {
+  const host = identifier
+    .replace(/^\[([^\]]+)\](:\d+)?$/, '$1')
+    .replace(/^(\d+\.\d+\.\d+\.\d+):\d+$/, '$1')
+    .toLowerCase();
+  return host === 'unknown' || host === 'localhost' || host === '127.0.0.1' || host === '::1' || host === '::ffff:127.0.0.1';
 }
 
 /**
@@ -89,13 +79,29 @@ export function getClientIP(request: Request): string {
  *
  * @param identifier - User ID for authenticated users, IP for anonymous
  * @param isAuthenticated - Whether the user is logged in
+ * @param limits - Another budget than the chat's, such as Query's reads with no model
+ * @param name - The budget's name, which keeps its counts apart from the chat's
  * @returns Rate limit result with allowed status and metadata
  */
 export function checkChatRateLimit(
   identifier: string,
-  isAuthenticated: boolean
+  isAuthenticated: boolean,
+  limits: RateLimits = RATE_LIMITS,
+  name?: string
 ): RateLimitResult {
   const now = Date.now();
+
+  // Local development: every request arrives from the one loopback address
+  // (or with no proxy header at all), so a few smoke tests would lock the
+  // developer out for an hour. Production is not affected.
+  if (process.env.NODE_ENV === 'development' && !isAuthenticated && isLoopback(identifier)) {
+    return {
+      allowed: true,
+      remaining: limits.anonymous.maxRequests,
+      resetTime: new Date(now + limits.anonymous.windowMs),
+      limit: limits.anonymous.maxRequests,
+    };
+  }
 
   // Periodic cleanup
   if (now - lastCleanup > CLEANUP_INTERVAL_MS) {
@@ -103,10 +109,10 @@ export function checkChatRateLimit(
   }
 
   const config = isAuthenticated
-    ? RATE_LIMITS.authenticated
-    : RATE_LIMITS.anonymous;
+    ? limits.authenticated
+    : limits.anonymous;
 
-  const key = isAuthenticated ? `auth:${identifier}` : `anon:${identifier}`;
+  const key = `${name ? `${name}:` : ''}${isAuthenticated ? 'auth' : 'anon'}:${identifier}`;
   const entry = rateLimitStore.get(key);
 
   // No existing entry - create new window

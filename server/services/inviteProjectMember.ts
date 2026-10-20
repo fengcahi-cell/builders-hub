@@ -2,9 +2,10 @@ import { prisma } from "@/prisma/prisma";
 import { sendInvitation } from "./SendInvitationProjectMember";
 import { getUserByEmail } from "./getUser";
 import { Prisma } from "@prisma/client";
-import { baseUrl } from "@/utils/metadata";
 import { type EventsLang } from "@/lib/events/i18n";
-import { MINI_GRANT_HACKATHON_ID, MINI_GRANT_SLUG } from "@/lib/grants/programs";
+import { buildInviteLink } from "@/lib/invitations/inviteLink";
+import { MemberStatus } from "@/types/project";
+import { normalizeEmail } from "@/lib/utils";
 
 interface InvitationResult {
   Success: boolean;
@@ -31,8 +32,9 @@ export async function generateInvitation(
     throw new Error("Hackathon ID is required");
   }
 
-  // Remove duplicate emails to prevent multiple invitations to the same user
-  const uniqueEmails = [...new Set(emails)];
+  // Normalize first (emails are stored lowercased in the DB — see normalizeEmail),
+  // then dedupe so case variants of the same address collapse into one invite.
+  const uniqueEmails = [...new Set(emails.map(normalizeEmail))];
 
   // Use existing project if provided, otherwise create a new one
   let project;
@@ -91,7 +93,7 @@ async function handleEmailInvitation(
   );
 
   // Skip if member is already confirmed (no need to send invitation again)
-  if (member.status === "Confirmed") {
+  if (member.status === MemberStatus.CONFIRMED) {
     return;
   }
 
@@ -143,7 +145,7 @@ async function createOrUpdateMemberAtomically(
         where: { id: existingMember.id },
         data: {
           role: "Member",
-          status: "Pending Confirmation",
+          status: MemberStatus.PENDING,
           ...(invitedUser ? { user_id: invitedUser.id } : {}),
         },
       });
@@ -154,15 +156,13 @@ async function createOrUpdateMemberAtomically(
           user_id: invitedUser?.id,
           project_id: projectId,
           role: "Member",
-          status: "Pending Confirmation",
+          status: MemberStatus.PENDING,
           email: email,
         },
       });
     }
   });
 }
-
-const BUILD_GAMES_HACKATHON_ID = "249d2911-7931-4aa0-a696-37d8370b79f9";
 
 async function sendInvitationEmail(
   member: any,
@@ -173,12 +173,12 @@ async function sendInvitationEmail(
   stage?: number,
   lang: EventsLang = "en"
 ): Promise<{ success: boolean; inviteLink: string }> {
-  const inviteLink =
-    hackathonId === BUILD_GAMES_HACKATHON_ID
-      ? `${baseUrl.origin}/build-games/submit?stage=${stage ?? 1}&invitation=${member.id}`
-      : hackathonId === MINI_GRANT_HACKATHON_ID
-        ? `${baseUrl.origin}/grants/${MINI_GRANT_SLUG}/apply?project=${project.id}`
-        : `${baseUrl.origin}/events/project-submission?event=${hackathonId}&invitation=${member.id}#team`;
+  const inviteLink = buildInviteLink({
+    hackathonId,
+    projectId: project.id,
+    memberId: member.id,
+    stage,
+  });
   let result = { success: true, inviteLink: inviteLink };
   const hackathon = await prisma.hackathon.findUnique({
     where: { id: hackathonId },
@@ -216,7 +216,7 @@ async function createProject(hackathonId: string, userId: string) {
             some: {
               user_id: userId,
               status: {
-                in: ["Confirmed"],
+                in: [MemberStatus.CONFIRMED],
               },
             },
           },
@@ -251,7 +251,7 @@ async function createProject(hackathonId: string, userId: string) {
             create: {
               user_id: userId,
               role: "Member",
-              status: "Confirmed",
+              status: MemberStatus.CONFIRMED,
               email:
                 (
                   await tx.user.findUnique({

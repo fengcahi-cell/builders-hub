@@ -2,6 +2,18 @@
 
 import * as React from "react";
 import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Legend,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import {
   GitHubIcon,
   GlobeIcon,
   LinkedInIcon,
@@ -13,6 +25,8 @@ import {
 } from "./icons";
 import type {
   BuilderInsightsData,
+  DailyPoint,
+  ReferralPeriodData,
   SocialPlatform,
 } from "@/server/services/builderInsights";
 import {
@@ -31,6 +45,7 @@ interface Props {
 }
 
 type ChartKey = "signups" | "visits" | "console" | "all";
+type GranularityKey = "day" | "month";
 type LeaderboardKey = "people" | "teams";
 type EventSortKey = "recent" | "top";
 type CompletionKey = "platform" | "depth";
@@ -39,7 +54,7 @@ const ACCENT_SIGNUPS = "#E84142";
 const ACCENT_VISITS = "#7FA6FF";
 const ACCENT_CONSOLE = "#B88DFF";
 
-// Per-platform accents for the profile-completion bars — neon variants in
+// Per-platform accents for the profile-completion bars: neon variants in
 // line with the shell's vivid tokens (--pr-avax-hover, --pr-success-main).
 const PLATFORM_ACCENT: Record<SocialPlatform, string> = {
   x: "#ff5658",
@@ -86,24 +101,6 @@ const DEPTH_ACCENT: Record<number, string> = {
 export function InsightsCard({ data, loading, error }: Props) {
   return (
     <div className="pr-card">
-      <div className="pr-head">
-        <div
-          className="pr-ico"
-          style={{
-            background: "var(--pr-primary-light)",
-            color: "var(--pr-accent-main)",
-          }}
-        >
-          <GlobeIcon size={18} />
-        </div>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <h3>Builder Insights</h3>
-          <div className="pr-desc">
-            Growth, engagement, and referral attribution across Builder Hub —
-            last 30 days vs. previous 30.
-          </div>
-        </div>
-      </div>
       <div className="pr-body">
         {error ? (
           <div className="pr-empty">{error}</div>
@@ -113,7 +110,12 @@ export function InsightsCard({ data, loading, error }: Props) {
             <span>Loading Builder Insights…</span>
           </div>
         ) : (
-          <InsightsBody data={data} />
+          <>
+            <p style={{ margin: 0, fontSize: 12, color: "var(--pr-g-650)" }}>
+              Last 30 days compared with the 30 days before.
+            </p>
+            <InsightsBody data={data} />
+          </>
         )}
       </div>
     </div>
@@ -133,13 +135,13 @@ function InsightsBody({ data }: { data: BuilderInsightsData }) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// KPI strip — 8 panels (same data types as the previous Insights page).
+// KPI strip: 8 panels (same data types as the previous Insights page).
 // ───────────────────────────────────────────────────────────────────────────
 
 function KPIStrip({ data }: { data: BuilderInsightsData }) {
   return (
     <div className="pr-kpi-grid">
-      {/* Row 1 — top-line Builder Hub volume */}
+      {/* Row 1: top-line Builder Hub volume */}
       <KPI
         label="Total accounts"
         value={formatNumber(data.totalAccounts)}
@@ -162,7 +164,7 @@ function KPIStrip({ data }: { data: BuilderInsightsData }) {
         delta={data.rollingVisitsDeltaPercent}
         sub={`vs ${formatNumber(data.previous30DayVisits)}`}
       />
-      {/* Row 2 — engagement and depth */}
+      {/* Row 2: engagement and depth */}
       <KPI
         label="Top country"
         valueSmall
@@ -171,7 +173,7 @@ function KPIStrip({ data }: { data: BuilderInsightsData }) {
             ? `${countryNameToFlag(data.topCountry30d.countryCode) ||
                 countryNameToFlag(data.topCountry30d.country) ||
                 flagEmoji(data.topCountry30d.countryCode)} ${data.topCountry30d.country}`.trim()
-            : "—"
+            : "None"
         }
         sub={
           data.topCountry30d
@@ -244,38 +246,53 @@ function Delta({ pct }: { pct: number }) {
 interface Series {
   label: string;
   accent: string;
-  data: Array<{ month: string; value: number }>;
+  // `bucket` is the ISO period the point falls in: "2026-11" for a month,
+  // "2026-11-15" for a day. Both sort lexically, so the chart needs no
+  // separate handling for the two granularities.
+  data: Array<{ bucket: string; value: number }>;
 }
+
+const toDailyPoints = (rows: DailyPoint[]) =>
+  rows.map((r) => ({ bucket: r.date, value: r.value }));
 
 function ChartSection({ data }: { data: BuilderInsightsData }) {
   const [tab, setTab] = React.useState<ChartKey>("signups");
+  const [granularity, setGranularity] = React.useState<GranularityKey>("month");
+  const daily = granularity === "day";
+  const per = daily ? "day" : "month";
 
   const signupsSeries: Series = React.useMemo(
     () => ({
-      label: "Signups / month",
+      label: `Signups / ${per}`,
       accent: ACCENT_SIGNUPS,
-      data: data.monthlySignups.map((r) => ({ month: r.month, value: r.signups })),
+      data: daily
+        ? toDailyPoints(data.dailySignups)
+        : data.monthlySignups.map((r) => ({ bucket: r.month, value: r.signups })),
     }),
-    [data.monthlySignups],
+    [daily, per, data.dailySignups, data.monthlySignups],
   );
   const visitsSeries: Series = React.useMemo(
     () => ({
-      label: "Unique visitors / month",
+      label: `Unique visitors / ${per}`,
       accent: ACCENT_VISITS,
-      data: data.monthlyVisits.map((r) => ({ month: r.month, value: r.visitors })),
+      data: daily
+        ? toDailyPoints(data.dailyVisits)
+        : data.monthlyVisits.map((r) => ({ bucket: r.month, value: r.visitors })),
     }),
-    [data.monthlyVisits],
+    [daily, per, data.dailyVisits, data.monthlyVisits],
   );
   const consoleSeries: Series = React.useMemo(
     () => ({
-      label: "Console users / month",
+      label: `Console users / ${per}`,
       accent: ACCENT_CONSOLE,
-      data: data.monthlyConsoleUsers.map((r) => ({
-        month: r.month,
-        value: r.visitors,
-      })),
+      data: daily
+        ? toDailyPoints(data.dailyConsoleUsers)
+        : data.monthlyConsoleUsers.map((r) => ({
+            bucket: r.month,
+            value: r.visitors,
+          })),
     }),
-    [data.monthlyConsoleUsers],
+    [daily, per, data.dailyConsoleUsers, data.monthlyConsoleUsers],
   );
 
   const activeSeries: Series[] =
@@ -288,10 +305,14 @@ function ChartSection({ data }: { data: BuilderInsightsData }) {
           : [signupsSeries, visitsSeries, consoleSeries];
 
   const latest = activeSeries[0]?.data.at(-1)?.value ?? 0;
+  // Daily buckets are UTC days server-side (they are cached and shared across
+  // viewers, so they cannot follow each viewer's zone the way the referral
+  // drill-down does). Say so rather than let the two quietly disagree.
+  const window = daily ? "Trailing 90 days · UTC" : "Trailing 12 months";
   const subtitle =
     tab === "all"
-      ? "Trailing 12 months · normalized comparison"
-      : `Trailing 12 months · ${formatNumber(latest)} latest`;
+      ? `${window} · normalized comparison`
+      : `${window} · ${formatNumber(latest)} latest`;
 
   return (
     <section className="pr-insights__section">
@@ -304,34 +325,49 @@ function ChartSection({ data }: { data: BuilderInsightsData }) {
         </h4>
         <span className="pr-insights__subtitle">{subtitle}</span>
       </header>
-      <Segmented<ChartKey>
-        value={tab}
-        onChange={setTab}
-        options={[
-          { value: "signups", label: "Signups" },
-          { value: "visits", label: "Visits" },
-          { value: "console", label: "Console" },
-          { value: "all", label: "All" },
-        ]}
-      />
+      <div className="pr-chart-controls">
+        <Segmented<ChartKey>
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: "signups", label: "Signups" },
+            { value: "visits", label: "Visits" },
+            { value: "console", label: "Console" },
+            { value: "all", label: "All" },
+          ]}
+        />
+        <Segmented<GranularityKey>
+          value={granularity}
+          onChange={setGranularity}
+          options={[
+            { value: "day", label: "Day" },
+            { value: "month", label: "Month" },
+          ]}
+        />
+      </div>
       <div className="pr-chart">
         <BigChart series={activeSeries} normalized={tab === "all"} />
-        {tab === "all" && (
-          <div className="pr-chart__legend">
-            {activeSeries.map((s) => (
-              <span key={s.label} className="pr-chart__legend-item">
-                <span
-                  className="pr-chart__legend-swatch"
-                  style={{ background: s.accent }}
-                />
-                {s.label}
-              </span>
-            ))}
-          </div>
-        )}
       </div>
     </section>
   );
+}
+
+const AXIS_TICK = {
+  fontSize: 11,
+  fill: "var(--pr-g-650)",
+  fontFamily: "ui-monospace, monospace",
+} as const;
+
+const TOOLTIP_STYLE: React.CSSProperties = {
+  background: "var(--pr-g-100)",
+  border: "1px solid var(--pr-g-400)",
+  borderRadius: 10,
+  fontSize: 12,
+  fontFamily: "ui-monospace, monospace",
+};
+
+function formatTick(v: number): string {
+  return v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(Math.round(v));
 }
 
 function BigChart({
@@ -341,154 +377,140 @@ function BigChart({
   series: Series[];
   normalized: boolean;
 }) {
-  const W = 880;
-  const H = 260;
-  const PAD_L = normalized ? 14 : 52;
-  const PAD_R = 14;
-  const PAD_T = 20;
-  const PAD_B = 32;
-  const innerW = W - PAD_L - PAD_R;
-  const innerH = H - PAD_T - PAD_B;
-
-  // X-axis is the union of months across the active series, sorted. This way
-  // each point lands at its real calendar position — series that started
-  // later (e.g. console) won't be stretched to fill the whole axis.
-  const monthSet = new Set<string>();
-  for (const s of series) for (const p of s.data) monthSet.add(p.month);
-  const months = Array.from(monthSet).sort();
-
-  if (months.length === 0) {
-    return (
-      <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-        <text
-          x={W / 2}
-          y={H / 2}
-          textAnchor="middle"
-          fontSize={12}
-          fill="var(--pr-g-650)"
-          fontFamily="ui-monospace, monospace"
-        >
-          No data yet
-        </text>
-      </svg>
+  // Merge all series onto a shared time axis so each point lands at its
+  // real calendar position: series that started later (e.g. console)
+  // won't be stretched to fill the whole axis.
+  const rows = React.useMemo(() => {
+    const byBucket = new Map<string, Record<string, string | number>>();
+    for (const s of series) {
+      const max = Math.max(...s.data.map((p) => p.value), 1);
+      for (const p of s.data) {
+        const row = byBucket.get(p.bucket) ?? { bucket: p.bucket };
+        // Normalized mode plots each series as % of its own peak (single
+        // shared 0–100 axis); tooltips always show the raw value.
+        row[s.label] = normalized ? (p.value / max) * 100 : p.value;
+        row[`${s.label}__raw`] = p.value;
+        byBucket.set(p.bucket, row);
+      }
+    }
+    return Array.from(byBucket.values()).sort((a, b) =>
+      String(a.bucket).localeCompare(String(b.bucket)),
     );
+  }, [series, normalized]);
+
+  if (rows.length === 0) {
+    return <div className="pr-leaderboard__empty">No data yet</div>;
   }
 
-  const step = innerW / Math.max(months.length - 1, 1);
-  const xForMonth = (month: string) => {
-    const idx = months.indexOf(month);
-    return PAD_L + idx * step;
+  const tooltipFormatter = (
+    value: number | string,
+    name: string | number,
+    item: { payload?: Record<string, string | number> },
+  ) => {
+    const raw = item.payload?.[`${name}__raw`];
+    return [formatNumber(Number(raw ?? value)), String(name)] as [string, string];
   };
 
-  const seriesScales = series.map((s) => {
-    const vals = s.data.map((r) => r.value);
-    const max = Math.max(...vals, 1);
-    const min = normalized ? 0 : Math.min(...vals, 0);
-    return { vals, max, min, span: Math.max(max - min, 1) };
-  });
-
-  const yFor = (sIdx: number, v: number) => {
-    const { min, span } = seriesScales[sIdx];
-    return PAD_T + innerH - ((v - min) / span) * innerH;
+  const common = {
+    data: rows,
+    margin: { top: 8, right: 8, bottom: 0, left: 0 },
   };
-
-  const ticks =
-    !normalized && seriesScales[0]
-      ? [0, 0.25, 0.5, 0.75, 1].map(
-          (t) => seriesScales[0].min + t * seriesScales[0].span,
-        )
-      : [];
+  // NOTE: grid/axes/tooltip/legend must be DIRECT children of the chart:
+  // recharts does not find components nested inside a fragment variable.
+  const gridProps = {
+    stroke: "var(--pr-g-300)",
+    strokeDasharray: "2 4",
+    vertical: false,
+  };
+  const xAxisProps = {
+    dataKey: "bucket",
+    tick: AXIS_TICK,
+    // Drops the year: "2026-11" → "11", "2026-11-15" → "11-15".
+    tickFormatter: (b: string) => b.slice(5),
+    axisLine: false,
+    tickLine: false,
+    // A daily window is ~90 buckets wide; let recharts thin the labels.
+    interval: "preserveStartEnd" as const,
+  };
+  // Normalized ("All") mode plots shapes only, like the previous chart: each
+  // series scaled to its own peak, no y-axis: tooltips carry the raw values.
+  const yAxisProps = {
+    tick: AXIS_TICK,
+    tickFormatter: formatTick,
+    axisLine: false,
+    tickLine: false,
+    width: 44,
+    hide: normalized,
+    domain: normalized ? ([0, 100] as [number, number]) : undefined,
+  };
+  const tooltipProps = {
+    contentStyle: TOOLTIP_STYLE,
+    labelStyle: { color: "var(--pr-g-1000)" },
+    cursor: { stroke: "var(--pr-g-400)" },
+    formatter: tooltipFormatter,
+  };
+  const legendProps = {
+    iconType: "plainline" as const,
+    wrapperStyle: { fontSize: 12, fontFamily: "ui-monospace, monospace" },
+  };
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none">
-      <defs>
-        {series.map((s) => {
-          const id = `pr-chart-grad-${s.accent.replace(/\W/g, "")}`;
-          return (
-            <linearGradient key={id} id={id} x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor={s.accent} stopOpacity={0.28} />
-              <stop offset="100%" stopColor={s.accent} stopOpacity={0} />
-            </linearGradient>
-          );
-        })}
-      </defs>
-
-      {ticks.map((t, i) => (
-        <g key={`tick-${i}`}>
-          <line
-            x1={PAD_L}
-            x2={W - PAD_R}
-            y1={yFor(0, t)}
-            y2={yFor(0, t)}
-            stroke="var(--pr-g-300)"
-            strokeDasharray="2 4"
-          />
-          <text
-            x={PAD_L - 10}
-            y={yFor(0, t) + 4}
-            textAnchor="end"
-            fontSize={11}
-            fill="var(--pr-g-650)"
-            fontFamily="ui-monospace, monospace"
-          >
-            {t >= 1000 ? `${(t / 1000).toFixed(1)}k` : Math.round(t)}
-          </text>
-        </g>
-      ))}
-
-      {series.map((s, sIdx) => {
-        if (s.data.length === 0) return null;
-        const pts = s.data.map(
-          (r) => `${xForMonth(r.month)},${yFor(sIdx, r.value)}`,
-        );
-        const line = `M${pts.join(" L")}`;
-        const firstX = xForMonth(s.data[0].month);
-        const lastX = xForMonth(s.data[s.data.length - 1].month);
-        const area = `M${pts[0]} L${pts.join(" ")} L${lastX},${PAD_T + innerH} L${firstX},${PAD_T + innerH} Z`;
-        const gradId = `pr-chart-grad-${s.accent.replace(/\W/g, "")}`;
-        return (
-          <g key={`${s.label}-${sIdx}`}>
-            {!normalized && <path d={area} fill={`url(#${gradId})`} />}
-            <path
-              d={line}
-              fill="none"
+    <ResponsiveContainer width="100%" height={260}>
+      {normalized ? (
+        <LineChart {...common}>
+          <CartesianGrid {...gridProps} />
+          <XAxis {...xAxisProps} />
+          <YAxis {...yAxisProps} />
+          <Tooltip {...tooltipProps} />
+          <Legend {...legendProps} />
+          {series.map((s) => (
+            <Line
+              key={s.label}
+              dataKey={s.label}
               stroke={s.accent}
               strokeWidth={2.25}
-              strokeLinejoin="round"
-              strokeLinecap="round"
+              dot={false}
+              connectNulls
             />
-            {!normalized &&
-              s.data.map((r) => {
-                const px = xForMonth(r.month);
-                const py = yFor(sIdx, r.value);
-                return (
-                  <circle
-                    key={`${s.label}-pt-${r.month}`}
-                    cx={px}
-                    cy={py}
-                    r={3}
-                    fill={s.accent}
-                  />
-                );
-              })}
-          </g>
-        );
-      })}
-
-      {months.map((month) => (
-        <text
-          key={month}
-          x={xForMonth(month)}
-          y={H - 10}
-          textAnchor="middle"
-          fontSize={11}
-          fill="var(--pr-g-650)"
-          fontFamily="ui-monospace, monospace"
-        >
-          {month.slice(5)}
-        </text>
-      ))}
-    </svg>
+          ))}
+        </LineChart>
+      ) : (
+        <AreaChart {...common}>
+          <defs>
+            {series.map((s) => (
+              <linearGradient
+                key={s.label}
+                id={`pr-chart-grad-${s.accent.replace(/\W/g, "")}`}
+                x1="0"
+                x2="0"
+                y1="0"
+                y2="1"
+              >
+                <stop offset="0%" stopColor={s.accent} stopOpacity={0.28} />
+                <stop offset="100%" stopColor={s.accent} stopOpacity={0} />
+              </linearGradient>
+            ))}
+          </defs>
+          <CartesianGrid {...gridProps} />
+          <XAxis {...xAxisProps} />
+          <YAxis {...yAxisProps} />
+          <Tooltip {...tooltipProps} />
+          <Legend {...legendProps} />
+          {series.map((s) => (
+            <Area
+              key={s.label}
+              dataKey={s.label}
+              stroke={s.accent}
+              strokeWidth={2.25}
+              fill={`url(#pr-chart-grad-${s.accent.replace(/\W/g, "")})`}
+              dot={rows.length > 24 ? false : { r: 3, fill: s.accent, strokeWidth: 0 }}
+              activeDot={{ r: 4 }}
+              connectNulls
+            />
+          ))}
+        </AreaChart>
+      )}
+    </ResponsiveContainer>
   );
 }
 
@@ -528,7 +550,7 @@ function Segmented<T extends string>({
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Profile completion — current snapshot. "By platform" shows adoption per
+// Profile completion: current snapshot. "By platform" shows adoption per
 // social link; "By depth" shows how many of the four links users have.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -661,11 +683,103 @@ function ProfileCompletionSection({ data }: { data: BuilderInsightsData }) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Referral leaderboard — People / Teams toggle.
+// Referral leaderboard: People / Teams toggle.
 // ───────────────────────────────────────────────────────────────────────────
+
+function formatMonthLabel(month: string): string {
+  return new Date(`${month}-01T00:00:00Z`).toLocaleDateString("en-US", {
+    month: "short",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+function formatDayLabel(day: string): string {
+  return new Date(`${day}T00:00:00Z`).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    timeZone: "UTC",
+  });
+}
+
+/**
+ * The last 12 months, newest first, as "YYYY-MM". Generated rather than
+ * derived from the payload: the server no longer ships a row per
+ * referrer × month, so there is nothing to derive the list from, and any
+ * month in range is one fetch away regardless of whether it has data.
+ */
+function trailingMonths(count = 12): string[] {
+  const now = new Date();
+  return Array.from({ length: count }, (_, i) =>
+    new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - i, 1))
+      .toISOString()
+      .slice(0, 7),
+  );
+}
+
+// An event "on the 15th" means the 15th where the event happened, so periods
+// are resolved in the viewer's own zone rather than silently in UTC.
+const VIEWER_TIME_ZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+/** Today in the viewer's zone: east of UTC that is a day ahead of the UTC date. */
+function viewerToday(): string {
+  // en-CA formats as YYYY-MM-DD, which is what <input type="date"> wants.
+  return new Date().toLocaleDateString("en-CA", { timeZone: VIEWER_TIME_ZONE });
+}
 
 function LeaderboardSection({ data }: { data: BuilderInsightsData }) {
   const [tab, setTab] = React.useState<LeaderboardKey>("people");
+  // "" = all time; otherwise "YYYY-MM" (a month) or "YYYY-MM-DD" (a day).
+  // Month and day are one control: picking either clears the other.
+  const [period, setPeriod] = React.useState<string>("");
+  const [periodData, setPeriodData] = React.useState<ReferralPeriodData | null>(null);
+  const [periodLoading, setPeriodLoading] = React.useState(false);
+  const [periodError, setPeriodError] = React.useState<string | null>(null);
+
+  const months = React.useMemo(() => trailingMonths(), []);
+  const isDay = period.length === 10;
+
+  // Referrer × period rows are far too many to ship with the main payload, so
+  // a chosen period is fetched on demand, which also means every referrer in
+  // that period shows up, not just those in the all-time top 100.
+  React.useEffect(() => {
+    if (!period) {
+      setPeriodData(null);
+      setPeriodError(null);
+      return;
+    }
+    let cancelled = false;
+    setPeriodLoading(true);
+    setPeriodError(null);
+    const query = new URLSearchParams({ period, tz: VIEWER_TIME_ZONE });
+    fetch(`/api/profile/insights/referrals?${query}`)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((d: ReferralPeriodData) => {
+        if (!cancelled) setPeriodData(d);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.error("[InsightsCard] failed to load period referrals:", err);
+        setPeriodError("Could not load referrals for that period.");
+      })
+      .finally(() => {
+        if (!cancelled) setPeriodLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [period]);
+
+  const peopleRows = period ? (periodData?.people ?? []) : data.topReferrers;
+  const teamRows = period ? (periodData?.teams ?? []) : data.topTeamReferrers;
+
+  const periodLabel = !period
+    ? null
+    : `${isDay ? formatDayLabel(period) : formatMonthLabel(period)} · ${periodData?.timeZone ?? VIEWER_TIME_ZONE}`;
 
   return (
     <section className="pr-insights__section">
@@ -676,18 +790,43 @@ function LeaderboardSection({ data }: { data: BuilderInsightsData }) {
         <h4 className="pr-insights__title">Referral leaderboard</h4>
         <span className="pr-insights__subtitle">
           {tab === "people"
-            ? `${data.topReferrers.length} top contributors`
-            : `${data.topTeamReferrers.length} teams`}
+            ? `${peopleRows.length}${period ? "" : " top"} contributors`
+            : `${teamRows.length} teams`}
+          {periodLabel ? ` · ${periodLabel}` : ""}
         </span>
       </header>
-      <Segmented<LeaderboardKey>
-        value={tab}
-        onChange={setTab}
-        options={[
-          { value: "people", label: "People" },
-          { value: "teams", label: "Teams" },
-        ]}
-      />
+      <div className="pr-leaderboard__controls">
+        <Segmented<LeaderboardKey>
+          value={tab}
+          onChange={setTab}
+          options={[
+            { value: "people", label: "People" },
+            { value: "teams", label: "Teams" },
+          ]}
+        />
+        <select
+          className="pr-month-select"
+          value={period}
+          onChange={(e) => setPeriod(e.target.value)}
+          aria-label="Filter referrals by period"
+        >
+          <option value="">All time</option>
+          {isDay && <option value={period}>{formatDayLabel(period)}</option>}
+          {months.map((m) => (
+            <option key={m} value={m}>
+              {formatMonthLabel(m)}
+            </option>
+          ))}
+        </select>
+        <input
+          type="date"
+          className="pr-month-select pr-day-input"
+          value={isDay ? period : ""}
+          max={viewerToday()}
+          onChange={(e) => setPeriod(e.target.value)}
+          aria-label="Filter referrals by day"
+        />
+      </div>
 
       {tab === "people" ? (
         <div className="pr-leaderboard">
@@ -705,14 +844,19 @@ function LeaderboardSection({ data }: { data: BuilderInsightsData }) {
               </tr>
             </thead>
             <tbody>
-              {data.topReferrers.length === 0 ? (
+              {peopleRows.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="pr-leaderboard__empty">
-                    No referral conversions recorded yet.
+                    {periodLoading
+                      ? "Loading…"
+                      : (periodError ??
+                        (periodLabel
+                          ? `No referral conversions for ${periodLabel}.`
+                          : "No referral conversions recorded yet."))}
                   </td>
                 </tr>
               ) : (
-                data.topReferrers.slice(0, 20).map((r, i) => (
+                (period ? peopleRows : peopleRows.slice(0, 20)).map((r, i) => (
                   <tr key={r.referrerId}>
                     <td className="pr-rank">{i + 1}</td>
                     <td>
@@ -767,14 +911,19 @@ function LeaderboardSection({ data }: { data: BuilderInsightsData }) {
               </tr>
             </thead>
             <tbody>
-              {data.topTeamReferrers.length === 0 ? (
+              {teamRows.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="pr-leaderboard__empty">
-                    No team referral conversions recorded yet.
+                    {periodLoading
+                      ? "Loading…"
+                      : (periodError ??
+                        (periodLabel
+                          ? `No team referral conversions for ${periodLabel}.`
+                          : "No team referral conversions recorded yet."))}
                   </td>
                 </tr>
               ) : (
-                data.topTeamReferrers.map((r, i) => (
+                teamRows.map((r, i) => (
                   <tr key={r.teamId}>
                     <td className="pr-rank">{i + 1}</td>
                     <td>
@@ -803,8 +952,13 @@ function LeaderboardSection({ data }: { data: BuilderInsightsData }) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Event history — flat table view, newest first. Mirrors the referral
+// Hackathon history: flat table view, newest first. Mirrors the referral
 // leaderboard styling so the two sections feel like a matched pair.
+//
+// Named for what it actually queries: the payload filters to
+// event = 'hackathon', while the referral leaderboard counts non-hackathon
+// events in its own "Events" column. Two meanings of "event" on one screen
+// was confusing.
 // ───────────────────────────────────────────────────────────────────────────
 
 function EventHistorySection({ data }: { data: BuilderInsightsData }) {
@@ -839,7 +993,7 @@ function EventHistorySection({ data }: { data: BuilderInsightsData }) {
         <span className="pr-insights__heading-icon">
           <SparkleIcon size={18} />
         </span>
-        <h4 className="pr-insights__title">Event history</h4>
+        <h4 className="pr-insights__title">Hackathon history</h4>
         <span className="pr-insights__subtitle">
           {formatNumber(data.totalHackathonsHosted)} hosted ·{" "}
           {formatNumber(data.totalHackathonParticipants)} participants ·{" "}
@@ -860,8 +1014,9 @@ function EventHistorySection({ data }: { data: BuilderInsightsData }) {
         <table>
           <thead>
             <tr>
-              <th>Event</th>
+              <th>Hackathon</th>
               <th className="pr-num">Inscriptions</th>
+              <th className="pr-num">Participants</th>
               <th className="pr-num">Projects submitted</th>
               <th className="pr-num">Top traffic sources (90d)</th>
             </tr>
@@ -869,8 +1024,8 @@ function EventHistorySection({ data }: { data: BuilderInsightsData }) {
           <tbody>
             {sorted.length === 0 ? (
               <tr>
-                <td colSpan={4} className="pr-leaderboard__empty">
-                  No events recorded yet.
+                <td colSpan={5} className="pr-leaderboard__empty">
+                  No hackathons recorded yet.
                 </td>
               </tr>
             ) : (
@@ -885,6 +1040,7 @@ function EventHistorySection({ data }: { data: BuilderInsightsData }) {
                     )}
                   </td>
                   <td className="pr-num">{formatNumber(e.registrations)}</td>
+                  <td className="pr-num">{formatNumber(e.participants)}</td>
                   <td className="pr-num">{formatNumber(e.projects)}</td>
                   <td>
                     {e.topTrafficSources.length === 0 ? (

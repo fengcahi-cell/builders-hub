@@ -48,6 +48,8 @@ build/Release
 # Dependency directories
 node_modules/
 jspm_packages/
+# Solidity dependencies and build output for the blueprint Foundry suite (scripts/blueprints/setup-test-deps.sh)
+.blueprint-deps/
 
 # Snowpack dependency directory (https://snowpack.dev/)
 web_modules/
@@ -171,18 +173,22 @@ content/docs/acps/151-use-current-block-pchain-height-as-context.mdx
 content/docs/acps/176-dynamic-evm-gas-limit-and-price-discovery-updates.mdx
 content/docs/acps/181-p-chain-epoched-views.mdx
 content/docs/acps/191-seamless-l1-creation.mdx
-content/docs/acps/194-streaming-asynchronous-execution.mdx
+content/docs/acps/194-continuous-execution.mdx
 content/docs/acps/20-ed25519-p2p.mdx
 content/docs/acps/204-precompile-secp256r1.mdx
 content/docs/acps/209-eip7702-style-account-abstraction.mdx
 content/docs/acps/224-dynamic-gas-limit-in-subnet-evm.mdx
 content/docs/acps/226-dynamic-minimum-block-times.mdx
 content/docs/acps/23-p-chain-native-transfers.mdx
-content/docs/acps/236-continuous-staking.mdx
+content/docs/acps/236-auto-renewed-staking.mdx
 content/docs/acps/24-shanghai-eips.mdx
-content/docs/acps/247-delegation-multiplier-increase-maximum-validator-weight-reduction.mdx
+content/docs/acps/247-delegation-multiplier-increase.mdx
 content/docs/acps/25-vm-application-errors.mdx
 content/docs/acps/256-hardware-recommendations.mdx
+content/docs/acps/267-uptime-requirement-increase.mdx
+content/docs/acps/273-reduce-minimum-staking-duration.mdx
+content/docs/acps/283-dynamic-minimum-gas-price.mdx
+content/docs/acps/285-reduce-minimum-consumption-rate.mdx
 content/docs/acps/30-avalanche-warp-x-evm.mdx
 content/docs/acps/31-enable-subnet-ownership-transfer.mdx
 content/docs/acps/41-remove-pending-stakers.mdx
@@ -193,7 +199,6 @@ content/docs/acps/83-dynamic-multidimensional-fees.mdx
 content/docs/acps/84-table-preamble.mdx
 content/docs/acps/99-validatorsetmanager-contract.mdx
 content/docs/acps/index.mdx
-content/docs/avalanche-l1s/evm-configuration/warpmessenger.mdx
 content/docs/avalanche-l1s/validator-manager/contract.mdx
 content/docs/cross-chain/avalanche-warp-messaging/deep-dive.mdx
 content/docs/cross-chain/avalanche-warp-messaging/evm-integration.mdx
@@ -204,11 +209,11 @@ content/docs/cross-chain/icm-contracts/deep-dive.mdx
 content/docs/cross-chain/icm-contracts/overview.mdx
 content/docs/cross-chain/icm-contracts/upgradeability.mdx
 content/docs/cross-chain/interchain-token-transfer/overview.mdx
+content/docs/nodes/chain-configs/avalanche-l1s/avalanche-l1-configs.mdx
+content/docs/nodes/chain-configs/avalanche-l1s/subnet-evm.mdx
 content/docs/nodes/chain-configs/primary-network/c-chain.mdx
 content/docs/nodes/chain-configs/primary-network/p-chain.mdx
 content/docs/nodes/chain-configs/primary-network/x-chain.mdx
-content/docs/nodes/chain-configs/subnet-evm.mdx
-content/docs/nodes/configure/avalanche-l1-configs.mdx
 content/docs/nodes/configure/configs-flags.mdx
 content/docs/nodes/releases.mdx
 content/docs/rpcs/c-chain/index.mdx
@@ -221,7 +226,6 @@ content/docs/rpcs/other/proposervm-rpc.mdx
 content/docs/rpcs/p-chain/index.mdx
 content/docs/rpcs/subnet-evm/index.mdx
 content/docs/rpcs/x-chain/index.mdx
-content/docs/tooling/cli-commands.mdx
 # Generated event signatures for explorer
 abi/event-signatures.generated.ts
 
@@ -288,7 +292,6 @@ content/docs/rpcs/c-chain/**/meta.json
 !content/docs/rpcs/c-chain/meta.json
 !content/docs/rpcs/c-chain/index.mdx
 !content/docs/rpcs/c-chain/txn-format.mdx
-!content/docs/rpcs/c-chain/api.mdx
 
 # Generated X-Chain RPC API documentation (auto-generated from OpenAPI)
 content/docs/rpcs/x-chain/**/*.mdx
@@ -296,5 +299,3 @@ content/docs/rpcs/x-chain/**/meta.json
 !content/docs/rpcs/x-chain/meta.json
 !content/docs/rpcs/x-chain/index.mdx
 !content/docs/rpcs/x-chain/txn-format.mdx
-!content/docs/rpcs/x-chain/api.mdx
-!content/docs/rpcs/x-chain/rpc.mdx

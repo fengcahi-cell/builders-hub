@@ -2,39 +2,41 @@ import { NextResponse } from 'next/server';
 import { documentation, blog, academy, integration } from '@/lib/source';
 import type { DocumentRecord } from 'fumadocs-core/search/algolia';
 import l1Chains from '@/constants/l1-chains.json';
+import { getStructuredData } from '@/lib/search/structured-data';
 
 export const revalidate = false;
 
 // Static stats pages
 const statsPages: DocumentRecord[] = [
-  { title: 'Network Overview', url: '/stats/overview', _id: '/stats/overview', structured: { headings: [], contents: [] }, description: 'Avalanche network overview stats', tag: 'stats' },
-  { title: 'AVAX Token', url: '/stats/avax-token', _id: '/stats/avax-token', structured: { headings: [], contents: [] }, description: 'AVAX token metrics', tag: 'stats' },
+  { title: 'Network Overview', url: '/explorer/mainnet', _id: '/explorer/mainnet', structured: { headings: [], contents: [] }, description: 'Avalanche network overview stats', tag: 'stats' },
+  { title: 'AVAX Token', url: '/explorer/mainnet/token', _id: '/explorer/mainnet/token', structured: { headings: [], contents: [] }, description: 'AVAX token metrics', tag: 'stats' },
   { title: 'Network Metrics', url: '/stats/network-metrics', _id: '/stats/network-metrics', structured: { headings: [], contents: [] }, description: 'Network-wide metrics', tag: 'stats' },
-  { title: 'DApp Gas Usage', url: '/stats/dapps/treemap', _id: '/stats/dapps/treemap', structured: { headings: [], contents: [] }, description: 'DApp gas usage treemap', tag: 'stats' },
-  { title: 'Interchain Messaging', url: '/stats/interchain-messaging', _id: '/stats/interchain-messaging', structured: { headings: [], contents: [] }, description: 'ICM statistics', tag: 'stats' },
-  { title: 'Chain List', url: '/stats/chain-list', _id: '/stats/chain-list', structured: { headings: [], contents: [] }, description: 'All Avalanche L1 chains', tag: 'stats' },
-  { title: 'Validators', url: '/stats/validators', _id: '/stats/validators', structured: { headings: [], contents: [] }, description: 'Validator dashboard', tag: 'stats' },
+  { title: 'C-Chain Gas Market', url: '/explorer/mainnet/c-chain/gas', _id: '/explorer/mainnet/c-chain/gas', structured: { headings: [], contents: [] }, description: 'Live gas market, fee history, and gas usage by protocol', tag: 'stats' },
+  { title: 'Interchain Messaging', url: '/explorer/mainnet/chains', _id: '/explorer/mainnet/chains#icm', structured: { headings: [], contents: [] }, description: 'The network map: ICM between Avalanche L1s', tag: 'stats' },
+  { title: 'Chain List', url: '/explorer/mainnet/chains', _id: '/explorer/mainnet/chains', structured: { headings: [], contents: [] }, description: 'All Avalanche L1 chains', tag: 'stats' },
+  { title: 'Validators', url: '/explorer/mainnet/p-chain/validators', _id: '/explorer/mainnet/p-chain/validators', structured: { headings: [], contents: [] }, description: 'Primary Network validators and client versions', tag: 'stats' },
 ];
 
-// Generate per-L1 stats pages from chain registry
+// Generate per-L1 accounts pages from chain registry (the old per-chain
+// stats sheet dissolved into the explorer's subject tabs; accounts is
+// the one that exists for every catalog chain)
 const l1StatsPages: DocumentRecord[] = l1Chains.map((chain: any) => ({
-  title: `${chain.chainName} Stats`,
-  url: `/stats/l1/${chain.slug}`,
-  _id: `/stats/l1/${chain.slug}`,
+  title: `${chain.chainName} Accounts`,
+  url: `/explorer/mainnet/${chain.slug}/accounts`,
+  _id: `/explorer/mainnet/${chain.slug}/accounts`,
   structured: { headings: [], contents: [] },
-  description: `Real-time metrics for ${chain.chainName}${chain.category ? ` (${chain.category})` : ''}`,
+  description: `Active addresses, contracts deployed, and top accounts for ${chain.chainName}${chain.category ? ` (${chain.category})` : ''}`,
   tag: 'stats',
 }));
 
 export async function GET() {
   const results: DocumentRecord[] = await Promise.all([
     ...documentation.getPages().map(async (page) => {
-      const loadedData = await page.data.load()
       return {
         title: page.data.title,
         url: page.url,
         _id: page.url,
-        structured: loadedData.structuredData,
+        structured: await getStructuredData(page),
         description: page.data.description,
         tag: 'docs'
       }
@@ -50,12 +52,11 @@ export async function GET() {
       }
     }),
     ...integration.getPages().map(async (page) => {
-      const loadedData = await page.data.load()
       return {
         title: page.data.title,
         url: page.url,
         _id: page.url,
-        structured: loadedData.structuredData,
+        structured: await getStructuredData(page),
         description: page.data.description,
         tag: 'integrations'
       }

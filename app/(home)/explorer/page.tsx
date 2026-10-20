@@ -1,21 +1,9 @@
-import { Metadata } from "next";
-import AllChainsExplorerPage from "@/components/explorer/AllChainsExplorerPage";
-import { AllChainsExplorerLayout } from "@/components/explorer/AllChainsExplorerLayout";
+import { redirect } from "next/navigation";
 
-export const metadata: Metadata = {
-  title: "All Chains Explorer | Avalanche Ecosystem",
-  description: "Explore all Avalanche L1 chains in real-time - blocks, transactions, and cross-chain messages across the entire ecosystem.",
-  openGraph: {
-    title: "All Chains Explorer | Avalanche Ecosystem",
-    description: "Explore all Avalanche L1 chains in real-time - blocks, transactions, and cross-chain messages across the entire ecosystem.",
-  },
-};
-
-export default function ExplorerIndexPage() {
-  return (
-    <AllChainsExplorerLayout>
-      <AllChainsExplorerPage />
-    </AllChainsExplorerLayout>
-  );
+/* /explorer opens the network overview: a visitor to an explorer expects
+   blocks and transactions first. The city is one tab away, on Chains. A
+   temporary redirect, so the front door can move without browsers holding
+   on to an old target. */
+export default function ExplorerHome() {
+  redirect("/explorer/mainnet");
 }
-

@@ -1,15 +1,23 @@
 import { TransactionLifecycle } from "@/components/sae/TransactionLifecycle";
 import { FirewoodPage } from "@/components/firewood/FirewoodPage";
+import { ValidatorFlowExplainer } from "@/components/validator-flow/ValidatorFlowExplainer";
+import { StaircaseFigure } from "@/components/epoched-view/StaircaseFigure";
+import { HeightsRuler } from "@/components/epoched-view/HeightsRuler";
 import StateGrowthChart from "@/components/content-design/state-growth-chart";
 import { BackToTop } from "@/components/ui/back-to-top";
 import { Feedback } from "@/components/ui/feedback";
 import { SidebarActions } from "@/components/ui/sidebar-actions";
-import { CChainAPIPage, DataAPIPage, MetricsAPIPage, PChainAPIPage, XChainAPIPage } from "@/components/api/api-pages";
+import { CChainAPIPage, DataAPIPage, MetricsAPIPage, PChainAPIPage, VerificationAPIPage, XChainAPIPage } from "@/components/api/api-pages";
 import AddNetworkButtonInline from "@/components/client/AddNetworkButtonInline";
 import { documentation } from "@/lib/source";
 import { createMetadata } from "@/utils/metadata";
 import { sharedMDXComponents } from "@/components/mdx/shared-components";
-import { Callout } from "fumadocs-ui/components/callout";
+import { DocsCallout } from "@/components/docs-book/callout";
+import { ColorKeyToggle } from "@/components/docs-book/color-key-toggle";
+import { Figure } from "@/components/docs-book/figure";
+import { RewardRoutesFigure } from "@/components/docs-book/reward-routes-figure";
+import { docsFigures } from "@/components/docs-book/figures";
+import { Term } from "@/components/docs-book/term";
 import { File, Files, Folder } from "fumadocs-ui/components/files";
 import { Tabs } from "fumadocs-ui/components/tabs";
 import defaultComponents from "fumadocs-ui/mdx";
@@ -62,10 +70,14 @@ export default async function Page(props: {
           pagePath={`/${params.slug.join("/")}`}
           pageType="docs"
         />
+            <ColorKeyToggle />
             <BackToTop />
           </>
         ),
       }}
+      // Below 1280px the TOC rail is hidden, so the popover carries the color key too. Only with headings:
+      // a footer alone makes fumadocs show the popover bar on a page with no headings.
+      tableOfContentPopover={toc.length > 0 ? { footer: <ColorKeyToggle /> } : undefined}
     >
       <DocsTitle>{page.data.title || "Untitled"}</DocsTitle>
       {page.data.description && (
@@ -80,6 +92,11 @@ export default async function Page(props: {
             })(),
             ...((await import("lucide-react")) as unknown as MDXComponents),
             ...sharedMDXComponents,
+            Callout: DocsCallout,
+            Figure,
+            Term,
+            RewardRoutesFigure,
+            ...docsFigures,
             // Fix srcset -> srcSet for React 19 compatibility
             img: (props: any) => {
               const { srcset, ...imgProps } = props;
@@ -100,6 +117,9 @@ export default async function Page(props: {
             StateGrowthChart,
             TransactionLifecycle,
             FirewoodPage,
+            ValidatorFlowExplainer,
+            StaircaseFigure,
+            HeightsRuler,
             AddNetworkButtonInline,
             File,
             Folder,
@@ -111,6 +131,7 @@ export default async function Page(props: {
               const isPChainApi = document.includes('platformvm.yaml');
               const isCChainApi = document.includes('coreth.yaml');
               const isXChainApi = document.includes('xchain.yaml');
+              const isVerificationApi = document.includes('verification.json');
 
               if (isPChainApi) {
                 return <PChainAPIPage {...props} />;
@@ -120,12 +141,14 @@ export default async function Page(props: {
                 return <XChainAPIPage {...props} />;
               } else if (isMetricsApi) {
                 return <MetricsAPIPage {...props} />;
+              } else if (isVerificationApi) {
+                return <VerificationAPIPage {...props} />;
               } else {
                 return <DataAPIPage {...props} />;
               }
             },
             blockquote: (props: ComponentProps<"blockquote">) => (
-              <Callout>{props.children}</Callout>
+              <DocsCallout art={false}>{props.children}</DocsCallout>
             ),
           }}
         />
@@ -167,7 +190,7 @@ export async function generateMetadata(props: {
 
   const image = {
     alt: "Banner",
-    url: `/api/og/docs/${params.slug[0]}?${imageParams.toString()}`,
+    url: `/api/og/docs/${params.slug[0]}?${imageParams.toString()}&v=2`,
     width: 1200,
     height: 630,
   };

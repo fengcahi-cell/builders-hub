@@ -14,7 +14,7 @@ Custodians and institutions holding AVAX in Fireblocks regularly ask how to stak
 
 There is still a fully supported path: **Raw Signing**. Avalanche's C-Chain, P-Chain, and X-Chain all use the same secp256k1 key, so the key behind your Fireblocks AVAX wallet *is* your P-Chain key. Build the P-Chain transaction yourself, ask Fireblocks to sign its hash with that key, and broadcast. The MPC custody model stays fully intact — the private key never leaves Fireblocks, and your approval policies still gate every signature.
 
-This post walks the complete flow with working code: derive the P-Chain address, move AVAX from the C-Chain via atomic transfer (export + import), then stake it — by delegating to an existing validator or by registering a validator you run. Everything you need is inline — the only dependencies are [`@avalabs/avalanchejs`](https://github.com/ava-labs/avalanchejs), the [`@fireblocks/ts-sdk`](https://developers.fireblocks.com/docs/getting-started-with-the-fireblocks-sdks), and `@noble/hashes`.
+This post walks the complete flow with working code: derive the P-Chain address, move AVAX from the C-Chain via atomic transfer (export + import), then stake it — by delegating to an existing validator or by registering a validator you run. Everything you need is inline — the only dependencies are [`@avalabs/avalanchejs`](https://github.com/ava-labs/avalanchejs), the [`@fireblocks/ts-sdk`](https://developers.fireblocks.com/reference/typescript-sdk), and `@noble/hashes`.
 
 ## How raw signing maps to Avalanche
 
@@ -85,7 +85,7 @@ One property does a lot of work here: avalanchejs's `addSignature()` recovers th
 Raw Signing is **disabled by default in production workspaces** (sandbox has it on). This is the long pole — start it before writing any code:
 
 1. Request Raw Signing enablement from your Fireblocks CSM
-2. Add a [TAP policy rule](https://developers.fireblocks.com/docs/define-policy-rules) allowing `RAW` operations for the AVAX asset from your vault
+2. Add a [TAP policy rule](https://developers.fireblocks.com/docs/set-transaction-authorization-policy) allowing `RAW` operations for the AVAX asset from your vault
 
 Without the policy rule, every signing request fails with `BLOCKED_BY_POLICY`.
 
@@ -147,7 +147,7 @@ exportTx.addSignature(await rawSign(exportTx, "Export 25 AVAX to P-Chain"));
 const { txID } = await evmApi.issueSignedTx(exportTx.getSignedTx());
 ```
 
-Poll `evmApi.getAtomicTxStatus(txID)` until `Accepted`.
+Poll the `avax.getAtomicTx` RPC with `txID` until the response includes `blockHeight`. Do not use `avax.getAtomicTxStatus`. It is deprecated, and the public API endpoints do not serve it after the Helicon upgrade.
 
 </Step>
 <Step>
@@ -263,7 +263,7 @@ const { txID } = await pvmApi.issueSignedTx(validateTx.getSignedTx());
 </Tab>
 </Tabs>
 
-Either way, poll `pvmApi.getTxStatus({ txID })` until `Committed`, then watch your stake on the [explorer](https://subnets.avax.network/validators).
+Either way, poll `pvmApi.getTxStatus({ txID })` until `Committed`, then watch your stake on the [explorer](https://explorer.avax.network/validators).
 
 </Step>
 </Steps>
@@ -278,7 +278,7 @@ Either way, poll `pvmApi.getTxStatus({ txID })` until `Committed`, then watch yo
 
 ## Staking UX is about to get better
 
-Two ACPs currently moving through the proposal process would significantly improve the custodial staking story: [ACP-236](/docs/acps/236-continuous-staking) adds auto-renewal and auto-compounding so positions don't need to be manually re-established every period, and [ACP-273](https://github.com/avalanche-foundation/ACPs/blob/main/ACPs/273-reduce-minimum-staking-duration/README.md) cuts the minimum stake duration to roughly two days. Same transaction flow as above — just better parameters.
+Two ACPs currently moving through the proposal process would significantly improve the custodial staking story: [ACP-236](/docs/acps/236-auto-renewed-staking) adds auto-renewal and auto-compounding so positions don't need to be manually re-established every period, and [ACP-273](https://github.com/avalanche-foundation/ACPs/blob/main/ACPs/273-reduce-minimum-staking-duration/README.md) cuts the minimum stake duration to roughly two days. Same transaction flow as above — just better parameters.
 
 ## Try it
 

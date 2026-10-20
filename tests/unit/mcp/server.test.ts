@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { MCPServer, MAX_BATCH_SIZE } from '@/lib/mcp/server'
+import { MCPServer, MAX_BATCH_CONCURRENCY, MAX_BATCH_SIZE } from '@/lib/mcp/server'
 import { jsonRpcMessageSchema } from '@/lib/mcp/types'
 import { GITHUB_REPOSITORIES, githubTools } from '@/lib/mcp/tools/github'
 
@@ -100,6 +100,40 @@ describe('MCPServer.handlePost', () => {
       },
     })
   })
+
+  it('rejects an empty JSON-RPC batch', async () => {
+    await expect(createServer().handlePost([])).resolves.toMatchObject({
+      error: { code: -32600, message: expect.stringContaining('at least one') },
+    })
+  })
+
+  it('bounds concurrent work inside an accepted batch', async () => {
+    const server = createServer()
+    let active = 0
+    let peak = 0
+    server.registerToolDomain({
+      tools: [{ name: 'slow', description: 'test', inputSchema: { type: 'object', properties: {} } }],
+      handlers: {
+        slow: async () => {
+          active++
+          peak = Math.max(peak, active)
+          await new Promise((resolve) => setTimeout(resolve, 5))
+          active--
+          return { content: [{ type: 'text', text: 'ok' }] }
+        },
+      },
+    })
+    const batch = Array.from({ length: 10 }, (_, id) => ({
+      jsonrpc: '2.0' as const,
+      id,
+      method: 'tools/call' as const,
+      params: { name: 'slow', arguments: {} },
+    }))
+
+    const response = await server.handlePost(batch)
+    expect(response).toHaveLength(10)
+    expect(peak).toBe(MAX_BATCH_CONCURRENCY)
+  })
 })
 
 describe('githubTools', () => {
@@ -107,7 +141,6 @@ describe('githubTools', () => {
     expect(GITHUB_REPOSITORIES.map((repo) => repo.fullName)).toEqual([
       'ava-labs/avalanchego',
       'ava-labs/subnet-evm',
-      'ava-labs/coreth',
       'ava-labs/avalanche-cli',
       'ava-labs/platform-cli',
       'ava-labs/icm-services',
@@ -123,7 +156,7 @@ describe('githubTools', () => {
     const result = await githubTools.handlers.github_list_repositories({})
     const payload = JSON.parse(result.content[0].text)
 
-    expect(payload.repositories).toHaveLength(11)
+    expect(payload.repositories).toHaveLength(10)
     expect(payload.repositories[0]).toMatchObject({
       name: 'avalanchego',
       fullName: 'ava-labs/avalanchego',

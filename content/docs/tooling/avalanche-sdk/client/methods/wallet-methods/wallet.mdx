@@ -162,6 +162,10 @@ console.log("XP public key:", pubKeys.xp);
 
 Wait for a transaction to be confirmed on the network.
 
+<Callout type="warn">
+For C-Chain transactions (`chainAlias: "C"`), `waitForTxn` polls `avax.getAtomicTxStatus`. That method is deprecated, and the public API endpoints do not serve it after the Helicon upgrade. For C-Chain atomic transactions, poll [getAtomicTx](../public-methods/c-chain#getatomictx) until the response includes `blockHeight`.
+</Callout>
+
 **Function Signature:**
 
 ```typescript
@@ -239,6 +243,8 @@ interface SendXPTransactionParameters {
   subnetOwners?: PChainOwner;
   disableOwners?: PChainOwner;
   disableAuth?: number[];
+  autoRenewedValidatorOwners?: PChainOwner;
+  autoRenewedValidatorAuth?: number[];
 }
 
 interface SendXPTransactionReturnType {
@@ -249,19 +255,21 @@ interface SendXPTransactionReturnType {
 
 **Parameters:**
 
-| Name              | Type                          | Required | Description                                           |
-| ----------------- | ----------------------------- | -------- | ----------------------------------------------------- |
-| `account`         | `AvalancheAccount \| Address` | No       | Account to use for the transaction                    |
-| `tx`              | `string \| UnsignedTx`        | Yes      | Transaction to send (hex string or UnsignedTx object) |
-| `chainAlias`      | `"X" \| "P" \| "C"`           | Yes      | Target chain                                          |
-| `externalIndices` | `number[]`                    | No       | External indices to use for the transaction           |
-| `internalIndices` | `number[]`                    | No       | Internal indices to use for the transaction           |
-| `utxoIds`         | `string[]`                    | No       | UTXO IDs to use for the transaction                   |
-| `feeTolerance`    | `number`                      | No       | Fee tolerance to use for the transaction              |
-| `subnetAuth`      | `number[]`                    | No       | Subnet auth to use for the transaction                |
-| `subnetOwners`    | `PChainOwner`                 | No       | Subnet owners to use for the transaction              |
-| `disableOwners`   | `PChainOwner`                 | No       | Disable owners to use for the transaction             |
-| `disableAuth`     | `number[]`                    | No       | Disable auth to use for the transaction               |
+| Name                         | Type                          | Required | Description                                              |
+| ---------------------------- | ----------------------------- | -------- | -------------------------------------------------------- |
+| `account`                    | `AvalancheAccount \| Address` | No       | Account to use for the transaction                       |
+| `tx`                         | `string \| UnsignedTx`        | Yes      | Transaction to send (hex string or UnsignedTx object)    |
+| `chainAlias`                 | `"X" \| "P" \| "C"`           | Yes      | Target chain                                             |
+| `externalIndices`            | `number[]`                    | No       | External indices to use for the transaction              |
+| `internalIndices`            | `number[]`                    | No       | Internal indices to use for the transaction              |
+| `utxoIds`                    | `string[]`                    | No       | UTXO IDs to use for the transaction                      |
+| `feeTolerance`               | `number`                      | No       | Fee tolerance to use for the transaction                 |
+| `subnetAuth`                 | `number[]`                    | No       | Subnet auth to use for the transaction                   |
+| `subnetOwners`               | `PChainOwner`                 | No       | Subnet owners to use for the transaction                 |
+| `disableOwners`              | `PChainOwner`                 | No       | Disable owners to use for the transaction                |
+| `disableAuth`                | `number[]`                    | No       | Disable auth to use for the transaction                  |
+| `autoRenewedValidatorOwners` | `PChainOwner`                 | No       | Auto-renewed validator owners to use for the transaction |
+| `autoRenewedValidatorAuth`   | `number[]`                    | No       | Auto-renewed validator auth to use for the transaction   |
 
 **Returns:**
 
@@ -331,6 +339,8 @@ interface SignXPTransactionParameters {
   subnetOwners?: PChainOwner;
   disableOwners?: PChainOwner;
   disableAuth?: number[];
+  autoRenewedValidatorOwners?: PChainOwner;
+  autoRenewedValidatorAuth?: number[];
   context?: Context;
 }
 
@@ -347,23 +357,27 @@ interface SignXPTransactionReturnType {
   subnetOwners?: PChainOwner;
   disableOwners?: PChainOwner;
   disableAuth?: number[];
+  autoRenewedValidatorOwners?: PChainOwner;
+  autoRenewedValidatorAuth?: number[];
 }
 ```
 
 **Parameters:**
 
-| Name            | Type                          | Required | Description                                                                  |
-| --------------- | ----------------------------- | -------- | ---------------------------------------------------------------------------- |
-| `account`       | `AvalancheAccount \| Address` | No       | Account to use for the transaction                                           |
-| `tx`            | `string \| UnsignedTx`        | No       | Unsigned transaction (either `tx` or `signedTxHex` must be provided)         |
-| `signedTxHex`   | `string`                      | No       | Pre-signed transaction bytes (either `tx` or `signedTxHex` must be provided) |
-| `chainAlias`    | `"X" \| "P" \| "C"`           | Yes      | Target chain                                                                 |
-| `utxoIds`       | `string[]`                    | No       | UTXO IDs to use for the transaction                                          |
-| `subnetAuth`    | `number[]`                    | No       | Subnet auth to use for the transaction                                       |
-| `subnetOwners`  | `PChainOwner`                 | No       | Subnet owners to use for the transaction                                     |
-| `disableOwners` | `PChainOwner`                 | No       | Disable owners to use for the transaction                                    |
-| `disableAuth`   | `number[]`                    | No       | Disable auth to use for the transaction                                      |
-| `context`       | `Context`                     | No       | Transaction context (auto-fetched if omitted)                                |
+| Name                         | Type                          | Required | Description                                                                  |
+| ---------------------------- | ----------------------------- | -------- | ---------------------------------------------------------------------------- |
+| `account`                    | `AvalancheAccount \| Address` | No       | Account to use for the transaction                                           |
+| `tx`                         | `string \| UnsignedTx`        | No       | Unsigned transaction (either `tx` or `signedTxHex` must be provided)         |
+| `signedTxHex`                | `string`                      | No       | Pre-signed transaction bytes (either `tx` or `signedTxHex` must be provided) |
+| `chainAlias`                 | `"X" \| "P" \| "C"`           | Yes      | Target chain                                                                 |
+| `utxoIds`                    | `string[]`                    | No       | UTXO IDs to use for the transaction                                          |
+| `subnetAuth`                 | `number[]`                    | No       | Subnet auth to use for the transaction                                       |
+| `subnetOwners`               | `PChainOwner`                 | No       | Subnet owners to use for the transaction                                     |
+| `disableOwners`              | `PChainOwner`                 | No       | Disable owners to use for the transaction                                    |
+| `disableAuth`                | `number[]`                    | No       | Disable auth to use for the transaction                                      |
+| `autoRenewedValidatorOwners` | `PChainOwner`                 | No       | Auto-renewed validator owners to use for the transaction                     |
+| `autoRenewedValidatorAuth`   | `number[]`                    | No       | Auto-renewed validator auth to use for the transaction                       |
+| `context`                    | `Context`                     | No       | Transaction context (auto-fetched if omitted)                                |
 
 **Returns:**
 
@@ -373,15 +387,17 @@ interface SignXPTransactionReturnType {
 
 **Return Object:**
 
-| Property        | Type                | Description                             |
-| --------------- | ------------------- | --------------------------------------- |
-| `signedTxHex`   | `string`            | The signed transaction in hex format    |
-| `signatures`    | `Signatures[]`      | Array of signatures for the transaction |
-| `chainAlias`    | `"X" \| "P" \| "C"` | The chain alias                         |
-| `subnetAuth`    | `number[]?`         | Subnet auth used for the transaction    |
-| `subnetOwners`  | `PChainOwner?`      | Subnet owners used for the transaction  |
-| `disableOwners` | `PChainOwner?`      | Disable owners used for the transaction |
-| `disableAuth`   | `number[]?`         | Disable auth used for the transaction   |
+| Property                     | Type                | Description                                            |
+| ---------------------------- | ------------------- | ----------------------------------------------------- |
+| `signedTxHex`                | `string`            | The signed transaction in hex format                  |
+| `signatures`                 | `Signatures[]`      | Array of signatures for the transaction               |
+| `chainAlias`                 | `"X" \| "P" \| "C"` | The chain alias                                       |
+| `subnetAuth`                 | `number[]?`         | Subnet auth used for the transaction                  |
+| `subnetOwners`               | `PChainOwner?`      | Subnet owners used for the transaction                |
+| `disableOwners`              | `PChainOwner?`      | Disable owners used for the transaction               |
+| `disableAuth`                | `number[]?`         | Disable auth used for the transaction                 |
+| `autoRenewedValidatorOwners` | `PChainOwner?`      | Auto-renewed validator owners used for the transaction |
+| `autoRenewedValidatorAuth`   | `number[]?`         | Auto-renewed validator auth used for the transaction  |
 
 **Signatures Object:**
 
@@ -509,7 +525,7 @@ const typedSignature = await walletClient.signTypedData({
 });
 ```
 
-**For complete EVM wallet method reference, see:** [Viem Documentation](https://viem.sh/docs)
+**For complete EVM wallet method reference, see:** [Viem Documentation](https://viem.sh/docs/introduction)
 
 ---
 
@@ -602,4 +618,4 @@ See [C-Chain Wallet Methods](./c-chain-wallet) for complete reference.
 - **[X-Chain Wallet Methods](./x-chain-wallet)** - X-Chain transaction preparation
 - **[C-Chain Wallet Methods](./c-chain-wallet)** - C-Chain atomic transactions
 - **[Account Management](../accounts)** - Account types and creation
-- **[Viem Documentation](https://viem.sh/docs)** - Complete EVM wallet reference
+- **[Viem Documentation](https://viem.sh/docs/introduction)** - Complete EVM wallet reference

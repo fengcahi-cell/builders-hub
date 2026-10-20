@@ -8,13 +8,6 @@ import { ArrowRight, Shield } from "lucide-react";
 // Program card data with images
 const programs = [
   {
-    title: "Retro9000",
-    description: "Build innovative projects on Avalanche and get rewarded for your creativity and impact.",
-    href: "https://retro9000.avax.network",
-    external: true,
-    image: "https://qizat5l3bwvomkny.public.blob.vercel-storage.com/builders-hub/nav-banner/9000-logo-FYhqyinnspUefGJcGgj9AcT116yq98.png",
-  },
-  {
     title: "Call for Research Proposals",
     description: "Submit academic research on the economics of cryptoassets and decentralized networks. Up to $50,000 in research grants.",
     href: "/grants/avalanche-research-proposals",
@@ -37,30 +30,6 @@ const programs = [
   }
 ];
 
-const partnerPrograms = [
-  {
-    title: "Game Accelerator",
-    description: "Support and fast-track for promising gaming studios and projects building on Avalanche, in partnership with Helika.",
-    href: "https://www.helika.io/helika-avalanche-accelerator",
-    external: true,
-    image: "/images/helika.svg",
-  },
-  {
-    title: "Developer Credits",
-    description: "Access credits to build data-suites and vibe-code new projects on the Avalanche C-Chain, in partnership with Space & Time.",
-    href: "https://spaceandtimedb.notion.site/Space-and-Time-x-Avalanche-Builder-Credit-Grant-Program-239af37755f580b4929ff9328584f347?pvs=74",
-    external: true,
-    image: "/images/spacentime.jpg",
-  },
-{
-    title: "Security Audits",
-    description: "Explore 20+ trusted auditing providers and find the right partner to review, test, and strengthen your smart contracts.",
-    href: "https://areta.market/avalanche",
-    external: true,
-    image: "/images/auditagent.png",
-  },
-];
-
 interface ProgramCardProps {
   title: string;
   description: string;
@@ -72,7 +41,6 @@ interface ProgramCardProps {
 function ProgramCard({ title, description, href, external, image }: ProgramCardProps) {
   const CardWrapper = external ? 'a' : Link;
   const linkProps = external ? { href, target: "_blank", rel: "noopener noreferrer" } : { href };
-  const isSvg = image.endsWith('.svg');
 
   return (
     <CardWrapper {...linkProps} className="block group">
@@ -83,7 +51,7 @@ function ProgramCard({ title, description, href, external, image }: ProgramCardP
           alt={title}
           fill
           sizes="(min-width: 1024px) 33vw, (min-width: 640px) 50vw, 100vw"
-          className={`object-cover transition-transform duration-500 group-hover:scale-105 ${isSvg ? 'invert dark:invert-0' : ''}`}
+          className="object-cover transition-transform duration-500 group-hover:scale-105"
         />
 
         {/* Dark overlay for text readability */}
@@ -159,25 +127,12 @@ export default function Page() {
         {/* Programs Section */}
         <section id="programs" className="px-4 pb-16">
           <div className="mx-auto max-w-7xl space-y-16">
-            {/* Main Programs */}
             <div>
               <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-6">
                 Grant Programs
               </h2>
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
                 {programs.map((program) => (
-                  <ProgramCard key={program.title} {...program} />
-                ))}
-              </div>
-            </div>
-
-            {/* Partner Programs */}
-            <div>
-              <h2 className="text-sm font-medium text-zinc-500 dark:text-zinc-400 uppercase tracking-wider mb-6">
-                Partner Programs
-              </h2>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {partnerPrograms.map((program) => (
                   <ProgramCard key={program.title} {...program} />
                 ))}
               </div>

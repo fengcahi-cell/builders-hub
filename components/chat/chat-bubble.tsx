@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useRef, useEffect } from 'react';
+import { ASK_EVENT, getSelection } from '@/components/explorer-v2/dig/selection';
 import { usePathname, useRouter } from 'next/navigation';
 import { useChat, type UIMessage } from '@ai-sdk/react';
 import { DefaultChatTransport } from 'ai';
-import { MessageSquare, X, Loader2, Minus, Sparkles, Maximize2 } from 'lucide-react';
+import { MessageSquare, X, Loader2, Minus, Maximize2 } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -15,14 +16,6 @@ const bubbleTransport = new DefaultChatTransport({
   api: '/api/chat',
   body: { source: 'bubble' },
 });
-
-const PROMPTS = [
-  "Ask me anything... really anything",
-  "Need help? I'm here for you",
-  "Got questions? Let's chat",
-  "Curious about something?",
-  "I can help with that",
-];
 
 function getMessageText(message: UIMessage): string {
   if (message.parts && message.parts.length > 0) {
@@ -42,16 +35,13 @@ export function ChatBubble() {
   const router = useRouter();
   const [state, setState] = useState<BubbleState>('collapsed');
   const [inputValue, setInputValue] = useState('');
-  const [showPrompt, setShowPrompt] = useState(false);
-  const [currentPrompt, setCurrentPrompt] = useState(0);
   const [shouldPulse, setShouldPulse] = useState(false);
   const [mounted, setMounted] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const promptTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const pulseIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
-  const { messages, sendMessage, status, setMessages } = useChat({
+  const { messages, sendMessage, status, setMessages, error } = useChat({
     id: 'chat-bubble',
     transport: bubbleTransport,
     onFinish() {
@@ -60,6 +50,18 @@ export function ChatBubble() {
   });
 
   const isLoading = status === 'streaming' || status === 'submitted';
+
+  // the transport surfaces a failed request as its response body; the
+  // route answers with JSON that carries a readable `message`
+  const errorText = (() => {
+    if (!error) return null;
+    try {
+      const body = JSON.parse(error.message);
+      return typeof body?.message === 'string' ? body.message : error.message;
+    } catch {
+      return error.message || 'The chat did not answer. Try again.';
+    }
+  })();
 
   // Prevent hydration mismatch
   useEffect(() => {
@@ -87,27 +89,6 @@ export function ChatBubble() {
     };
   }, [state, mounted]);
 
-  // Show prompt tooltip periodically when collapsed
-  useEffect(() => {
-    if (state !== 'collapsed' || !mounted) return;
-
-    const showPromptCycle = () => {
-      setShowPrompt(true);
-      setCurrentPrompt(prev => (prev + 1) % PROMPTS.length);
-
-      promptTimeoutRef.current = setTimeout(() => {
-        setShowPrompt(false);
-        promptTimeoutRef.current = setTimeout(showPromptCycle, 10000 + Math.random() * 5000);
-      }, 4000);
-    };
-
-    promptTimeoutRef.current = setTimeout(showPromptCycle, 5000);
-
-    return () => {
-      if (promptTimeoutRef.current) clearTimeout(promptTimeoutRef.current);
-    };
-  }, [state, mounted]);
-
   // Focus input when transitioning to input state
   useEffect(() => {
     if (state === 'input') {
@@ -120,27 +101,60 @@ export function ChatBubble() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Hide on /chat and /console pages — AFTER all hooks to avoid Rules of Hooks violation
+  // "Ask about this" on an explorer visual: open and send the question
+  // with the selection attached
+  useEffect(() => {
+    const onAsk = (e: Event) => {
+      const prompt = (e as CustomEvent<{ prompt: string }>).detail?.prompt;
+      if (!prompt) return;
+      setState('expanded');
+      sendMessage({ text: prompt }, { body: { page: { path: pathname, selection: getSelection()?.brief } } });
+    };
+    window.addEventListener(ASK_EVENT, onAsk);
+    return () => window.removeEventListener(ASK_EVENT, onAsk);
+  }, [pathname, sendMessage]);
+
+  // Hide on /chat and /console pages, AFTER all hooks to avoid Rules of Hooks violation
   if (pathname.startsWith('/chat') || pathname.startsWith('/console')) {
     return null;
   }
 
-  // On /stats and /explorer, hide the bubble on mobile via CSS — those pages
+  // On /stats and /explorer, hide the bubble on mobile via CSS: those pages
   // are dense (charts, tables, search results) and the floating button steals
   // tap targets. Desktop still shows it.
   const hideOnMobile =
     pathname.startsWith('/stats') || pathname.startsWith('/explorer');
 
+  // The audits wizard (below md) and the auditor quote composer (below lg)
+  // pin a full-width action bar to the bottom edge; lift the bubble above it
+  // so it never covers the primary button at thumb reach. The profile save
+  // bar reaches the bubble below xl.
+  const liftForActionBar = pathname.startsWith('/audits/new')
+    ? 'max-md:bottom-24'
+    : pathname.startsWith('/audits/portal/requests/')
+      ? 'max-lg:bottom-24'
+      : pathname.startsWith('/profile')
+        ? 'max-xl:bottom-24'
+        : null;
+
   const handleBubbleClick = () => {
     if (state === 'collapsed') {
-      setShowPrompt(false);
       setState('input');
     }
   };
 
+  // the page the visitor has open travels with every message, so the
+  // assistant can explain what is on screen; the full chat inherits it
+  const page = { path: pathname };
+  // what the reader has picked out on the page (a run of txs on a gas
+  // map, a range of blocks) rides along too, read at send time
+  const pageWithSelection = () => ({ ...page, selection: getSelection()?.brief });
+  const knowsPage = pathname.startsWith('/explorer') || pathname.startsWith('/docs') || pathname.startsWith('/academy');
+
   const handleOpenFullChat = () => {
     if (messages.length > 0) {
       sessionStorage.setItem('chat-bubble-messages', JSON.stringify(messages));
+      sessionStorage.setItem('chat-bubble-page', JSON.stringify(page));
     }
     router.push('/chat');
   };
@@ -157,7 +171,7 @@ export function ChatBubble() {
 
   const onSubmit = () => {
     if (!inputValue.trim() || isLoading) return;
-    sendMessage({ text: inputValue.trim() });
+    sendMessage({ text: inputValue.trim() }, { body: { page: pageWithSelection() } });
     setInputValue('');
     setState('expanded');
   };
@@ -177,34 +191,15 @@ export function ChatBubble() {
       className={cn(
         'chatbot-container fixed bottom-6 right-6 z-50 flex-col items-end gap-3',
         hideOnMobile ? 'hidden md:flex' : 'flex',
+        liftForActionBar,
       )}
       data-chatbot
     >
-      {/* Prompt tooltip */}
-      {mounted && (
-        <div
-          className={cn(
-            "transform transition-all duration-500 ease-out",
-            showPrompt && state === 'collapsed'
-              ? "translate-y-0 opacity-100 scale-100"
-              : "translate-y-2 opacity-0 scale-95 pointer-events-none"
-          )}
-        >
-          <div className="relative bg-white dark:bg-zinc-900 text-zinc-900 dark:text-white px-4 py-2.5 rounded-2xl shadow-xl border border-zinc-200 dark:border-zinc-800 max-w-[220px]">
-            <div className="flex items-center gap-2">
-              <Sparkles className="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 shrink-0" />
-              <p className="text-sm font-medium leading-snug">{PROMPTS[currentPrompt]}</p>
-            </div>
-            {/* Arrow pointing to bubble */}
-            <div className="absolute -bottom-2 right-6 w-4 h-4 bg-white dark:bg-zinc-900 border-r border-b border-zinc-200 dark:border-zinc-800 transform rotate-45" />
-          </div>
-        </div>
-      )}
-
       {/* Collapsed bubble */}
       {state === 'collapsed' && (
         <button
           onClick={handleBubbleClick}
+          aria-label="Open chat"
           className={cn(
             "group relative w-14 h-14 rounded-full shadow-lg border flex items-center justify-center transition-all duration-300 hover:scale-110 hover:shadow-xl",
             "bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-700/50",
@@ -243,7 +238,7 @@ export function ChatBubble() {
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Type your question..."
+              placeholder={knowsPage ? 'Ask about this page...' : 'Type your question...'}
               rows={2}
               className="w-full bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700/50 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 resize-none focus:outline-none focus:ring-2 focus:ring-red-500/30 focus:border-red-500/40 dark:focus:ring-red-500/30 dark:focus:border-red-500/40 transition-all"
             />
@@ -341,6 +336,14 @@ export function ChatBubble() {
               );
             })}
 
+            {errorText && !isLoading && (
+              <div className="flex justify-start">
+                <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md text-sm leading-relaxed bg-red-50 dark:bg-red-950/40 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-900/50 [overflow-wrap:anywhere]">
+                  {errorText}
+                </div>
+              </div>
+            )}
+
             {isLoading && (
               <div className="flex justify-start">
                 <div className="bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700/50 px-4 py-3 rounded-2xl rounded-bl-md">
@@ -373,7 +376,7 @@ export function ChatBubble() {
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder="Type a message..."
+                placeholder={knowsPage ? 'Ask about this page...' : 'Type a message...'}
                 rows={1}
                 className="flex-1 bg-zinc-50 dark:bg-zinc-800/50 border border-zinc-200 dark:border-zinc-700/50 rounded-xl px-4 py-3 text-sm text-zinc-900 dark:text-zinc-100 placeholder:text-zinc-400 dark:placeholder:text-zinc-500 resize-none focus:outline-none focus:ring-2 focus:ring-red-500/30 focus:border-red-500/40 dark:focus:ring-red-500/30 dark:focus:border-red-500/40 transition-all"
               />

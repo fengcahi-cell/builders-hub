@@ -22,11 +22,6 @@ export const GITHUB_REPOSITORIES = [
     description: 'Subnet-EVM implementation, precompiles, EVM chain configuration, and VM plugin code',
   },
   {
-    name: 'coreth',
-    fullName: 'ava-labs/coreth',
-    description: 'C-Chain EVM implementation history and Coreth code',
-  },
-  {
     name: 'avalanche-cli',
     fullName: 'ava-labs/avalanche-cli',
     description: 'Avalanche CLI commands for L1 creation, deployment, validation, and node workflows',
@@ -295,6 +290,14 @@ async function searchCode(params: SearchCodeParams) {
 }
 
 function mapGithubError(status: number, details: string) {
+  if (status === 401) {
+    return {
+      total_count: 0,
+      items: [],
+      error: 'GitHub code search is unauthenticated (401). The server GITHUB_TOKEN is missing or invalid.',
+      suggestion: 'Set a valid GITHUB_TOKEN env var on the MCP deployment — /search/code requires authentication.',
+    };
+  }
   if (status === 408) {
     return {
       total_count: 0,
@@ -414,7 +417,7 @@ export const githubTools: ToolDomain = {
     {
       name: 'github_search_code',
       description:
-        'Search for code across core Avalanche GitHub repositories including avalanchego, subnet-evm, coreth, libevm, avalanche-cli, platform-cli, icm-services, icm-contracts, avalanche-network-runner, hypersdk, and builders-hub.',
+        'Search for code across core Avalanche GitHub repositories including avalanchego, subnet-evm, libevm, avalanche-cli, platform-cli, icm-services, icm-contracts, avalanche-network-runner, hypersdk, and builders-hub.',
       inputSchema: {
         type: 'object',
         properties: {

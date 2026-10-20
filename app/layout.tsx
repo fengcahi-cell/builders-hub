@@ -14,7 +14,6 @@ import { HideOnChatPage } from "@/components/layout/chat-page-hider";
 import { EmbedModeDetector } from "@/components/layout/embed-mode-detector";
 import { ThemeProvider } from "@/components/content-design/theme-observer";
 import { ChatBubble } from "@/components/chat/chat-bubble";
-import { UserAvatarProvider } from "@/components/context/UserAvatarContext";
 import { ReferralCapture } from "@/components/referrals/ReferralCapture";
 
 export const metadata = createMetadata({
@@ -48,6 +47,17 @@ export default function Layout({ children }: { children: ReactNode }) {
       className={`${GeistSans.variable} ${GeistMono.variable}`}
       suppressHydrationWarning
     >
+      <head>
+        {/* the display face paints the hero's rotating word; preloading it
+            kills the one-frame fallback flash on cold loads */}
+        <link
+          rel="preload"
+          href="/fonts/Aeonik-Black.woff2"
+          as="font"
+          type="font/woff2"
+          crossOrigin="anonymous"
+        />
+      </head>
       <PHProvider>
         <body className="flex min-h-screen flex-col" suppressHydrationWarning>
           {/* Detect embed mode and add class to document for CSS targeting */}
@@ -59,9 +69,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           </Suspense>
           <Body>
             <ThemeProvider>
-              <UserAvatarProvider>
-                <SearchRootProvider>{children}</SearchRootProvider>
-              </UserAvatarProvider>
+              <SearchRootProvider>{children}</SearchRootProvider>
               <HideOnChatPage>
                 <div id="privacy-banner-root" className="relative">
                   <PrivacyPolicyBox />

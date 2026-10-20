@@ -3,6 +3,7 @@ import { useWalletStore, type WalletType } from '../stores/walletStore';
 import { Wallet, Coins, Network } from 'lucide-react';
 import { useWalletSwitch } from './useWalletSwitch';
 import { useConnectModal } from '@rainbow-me/rainbowkit';
+import { OPEN_CONSOLE_WALLETS_EVENT } from '@/lib/console-wallets/core-provider';
 import type {
   RequirementAction,
   Requirement,
@@ -32,11 +33,18 @@ const ACTIONS = {
   },
   DOWNLOAD_CORE_WALLET: {
     type: 'redirect' as const,
-    label: 'Download',
-    title: 'Download Core Wallet',
-    description: 'Get Core — the wallet built for Avalanche',
+    label: 'Get Core',
+    title: 'Install a wallet extension',
+    description: 'Any EVM wallet works; Core is built for Avalanche and signs P-Chain transactions too',
     link: 'https://core.app/download',
     target: '_blank',
+  },
+  USE_CONSOLE_WALLET: {
+    type: 'console-wallet' as const,
+    label: 'Set up',
+    title: 'Use a Console wallet',
+    description:
+      'No extension needed: a key kept in this browser that signs without popups. Unlock or create one here.',
   },
   SWITCH_TO_TESTNET: {
     type: 'network' as const,
@@ -76,7 +84,8 @@ interface WalletState {
   pChainAddress: string;
   pChainBalance: number;
   cChainBalance: number;
-  selectedL1Balance: number;
+  /** null = the selected L1's balance could not be fetched (RPC unreachable). */
+  selectedL1Balance: number | null;
   bootstrapped: boolean;
   walletType: WalletType;
   isLoading: {
@@ -94,7 +103,7 @@ interface WalletRequirementConfig {
   action: RequirementAction;
   alternativeActions?: RequirementAction[];
   prerequisites?: WalletRequirementsConfigKey[];
-  getStatus: (walletState: WalletState) => { met: boolean; waiting: boolean };
+  getStatus: (walletState: WalletState) => { met: boolean; waiting: boolean; unknown?: boolean };
 }
 
 // Constants for each requirement type
@@ -117,12 +126,13 @@ const WALLET_REQUIREMENTS: Record<WalletRequirementsConfigKey, WalletRequirement
           action: ACTIONS.CONNECT_WALLET,
         },
         {
-          // No wallet detected at all → show Download Core
+          // No wallet detected at all → suggest installing one
           condition: () => true,
           action: ACTIONS.DOWNLOAD_CORE_WALLET,
         },
       ],
     },
+    alternativeActions: [ACTIONS.USE_CONSOLE_WALLET],
     getStatus: (walletState: WalletState) => ({
       met: walletState.bootstrapped,
       waiting: false,
@@ -135,6 +145,7 @@ const WALLET_REQUIREMENTS: Record<WalletRequirementsConfigKey, WalletRequirement
     icon: Wallet,
     prerequisites: [WalletRequirementsConfigKey.HasWallet],
     action: ACTIONS.CONNECT_WALLET,
+    alternativeActions: [ACTIONS.USE_CONSOLE_WALLET],
     getStatus: (walletState: WalletState) => ({
       met: !!walletState.walletEVMAddress,
       waiting: false,
@@ -216,8 +227,13 @@ const WALLET_REQUIREMENTS: Record<WalletRequirementsConfigKey, WalletRequirement
     prerequisites: [WalletRequirementsConfigKey.WalletConnected],
     action: ACTIONS.SWITCH_TO_TESTNET,
     getStatus: (walletState: WalletState) => ({
-      met: walletState.selectedL1Balance > 0,
+      // null = the balance could not be read (RPC unreachable / mixed
+      // content). Never block on an unverifiable check — the deploy
+      // preflight owns that failure with a specific message; blocking here
+      // told funded users to get tokens (issue #4450).
+      met: walletState.selectedL1Balance === null ? true : walletState.selectedL1Balance > 0,
       waiting: walletState.isLoading.l1Chains[walletState.walletChainId.toString()],
+      unknown: walletState.selectedL1Balance === null,
     }),
   },
 };
@@ -239,7 +255,7 @@ export function useWalletRequirements(configKey: WalletRequirementsConfigKey | W
   const cChainBalance = useWalletStore((s) => s.balances.cChain);
   const pChainBalance = useWalletStore((s) => s.balances.pChain);
   const walletChainId = useWalletStore((s) => s.walletChainId);
-  const selectedL1Balance = useWalletStore((s) => s.balances.l1Chains[walletChainId.toString()]);
+  const selectedL1Balance = useWalletStore((s) => s.balances.l1Chains[walletChainId.toString()] ?? null);
   const bootstrapped = useWalletStore((s) => s.getBootstrapped());
   const walletType = useWalletStore((s) => s.walletType);
 
@@ -330,6 +346,9 @@ export function useWalletRequirements(configKey: WalletRequirementsConfigKey | W
       case 'login':
         // Login actions are handled by account requirements
         break;
+      case 'console-wallet':
+        window.dispatchEvent(new Event(OPEN_CONSOLE_WALLETS_EVENT));
+        break;
       default:
         // Unknown action type
         break;
@@ -379,6 +398,7 @@ export function useWalletRequirements(configKey: WalletRequirementsConfigKey | W
       let prerequisiteNotMet: WalletRequirementsConfigKey | undefined;
       let met = false;
       let waiting = false;
+      let unknown = false;
       let resolvedAction: RequirementAction | null = requirement.action;
 
       if (requirement.prerequisites) {
@@ -401,6 +421,7 @@ export function useWalletRequirements(configKey: WalletRequirementsConfigKey | W
         const status = requirement.getStatus(walletState);
         met = status.met;
         waiting = status.waiting;
+        unknown = status.unknown ?? false;
 
         // Resolve conditional actions for display
         if (requirement.action && requirement.action.type === 'conditional') {
@@ -419,6 +440,7 @@ export function useWalletRequirements(configKey: WalletRequirementsConfigKey | W
         action: resolvedAction,
         met,
         waiting,
+        unknown,
         prerequisiteNotMet,
       } as Requirement;
     });

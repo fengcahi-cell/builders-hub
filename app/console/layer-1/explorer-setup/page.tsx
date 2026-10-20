@@ -1,9 +1,8 @@
-"use client";
+import ExplorerSetup from '@/components/toolbox/console/layer-1/explorer/ExplorerSetup';
+import { consoleToolMetadata } from "@/components/console/tool-metadata";
 
-import L1ExplorerSetup from "@/components/toolbox/console/layer-1/create/SelfHostedExplorer";
+export const metadata = consoleToolMetadata("/console/layer-1/explorer-setup");
 
 export default function Page() {
-  return (
-    <L1ExplorerSetup />
-  );
+  return <ExplorerSetup />;
 }

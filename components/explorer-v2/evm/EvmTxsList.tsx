@@ -1,0 +1,212 @@
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import { X } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { EvmShell } from "@/components/explorer-v2/EvmShell";
+import { Board, CellLabel, SectionHeader, idInk, fnInk, feeInk, RowDoor } from "@/components/explorer-v2/ui";
+import { ChartEmpty } from "@/components/explorer-v2/staking/bits";
+import { RANGE_DAYS, RANGE_LABEL } from "@/components/explorer-v2/time-range";
+import { truncate } from "@/components/explorer-v2/format";
+import { useEvmData, LIVE_REFRESH_MS, usePrice, usdOfWei } from "./hooks";
+import { useHeadStream, CONTINUOUS_EXECUTION_CHAINS } from "./useHeadStream";
+import { Belt, MotionRow, Party, RowSkeleton, ageShort, fmtAmount, useOpening, HEAD, ROW, INK, MUTED } from "./LiveBoards";
+import { txNewer, useTxWindow } from "./tx-window";
+import { useTicker } from "@/components/explorer-v2/network/ticker";
+import { ChartSection, DualChart, OverlayKey, fmtCompact, metricSeries, useChainMetrics } from "./metric-charts";
+import { prewarmContractNames, useVerifiedContracts } from "@/lib/sourcify-client";
+import { useMethodNames } from "./bits";
+import { useTokenList } from "@/lib/token-list";
+import { TxsViewSwitch } from "./views";
+import { useChainContext } from "@/app/(home)/explorer/[network]/[chain]/layout.client";
+import type { TxListResponse, TxSummary } from "@/lib/evm-explorer";
+import { readRpc } from "@/lib/explorer-rpc";
+
+/* The Transactions tab: the receipts stream as a full-width ledger.
+   On the C-Chain rows enter as the executor writes them (one at a time,
+   the home board's belt at 25 rows), each with what it did, who to, what
+   moved, what it cost, and how old it is. Other chains keep the indexer
+   list. The charts beneath give the feed its shape over the last month. */
+
+const LIVE_ROWS = 25;
+const PAGE = 25;
+const MAX = 100;
+const METRICS = ["txCount", "avgTps", "cumulativeTxCount"].join(",");
+const NO_TXS: TxSummary[] = [];
+
+export function EvmTxsList({ network }: { network: string }) {
+  const c = useChainContext();
+  const base = `/explorer/${network}/${c.chainSlug}`;
+  const sym = c.nativeToken ?? "AVAX";
+  const [limit, setLimit] = useState(PAGE);
+
+  const liveRpc = CONTINUOUS_EXECUTION_CHAINS.has(String(c.chainId)) ? readRpc(c.chainId, c.rpcUrl) : undefined;
+  const head = useHeadStream(liveRpc, { keep: 40, seed: 8, keepTxs: 160 });
+  // with the stream the list is a ticker from its first paint: the receipts
+  // and the indexer's page as one window, full from whichever lands first
+  const ticking = !!liveRpc;
+  const streaming = head.streamTxs.length > 0;
+
+  const indexed = useEvmData<TxListResponse>(c.chainId, "txs", { limit }, { refreshMs: streaming ? 0 : LIVE_REFRESH_MS });
+  const tokens = useTokenList(c.chainId);
+  const { price } = usePrice(c.chainId);
+  const usd = price?.price ?? null;
+
+  const source = useTxWindow(head.streamTxs, indexed.data?.transactions ?? NO_TXS, tokens);
+
+  const [hover, setHover] = useState(false);
+  const rows = useTicker(source, ticking ? LIVE_ROWS + 1 : limit, {
+    key: (t) => t.hash,
+    newer: txNewer,
+    paused: hover,
+    onEnqueue: (fresh) => void prewarmContractNames(c.chainId, fresh.map((t) => t.to)),
+    enabled: ticking,
+  });
+  const opening = useOpening(rows, (t) => t.hash);
+  const contracts = useVerifiedContracts(c.chainId, rows.map((t) => t.to));
+  const method = useMethodNames(c.chainId, rows);
+
+  // a fixed month, off the page clock: a list page carries no range
+  // control, so its two charts say their window in the title
+  const range = RANGE_DAYS.month;
+  const { metrics, failed } = useChainMetrics(c.chainId, range, METRICS);
+  const m = metrics ?? {};
+
+  // the parties take what the fixed columns leave: at 1400px and up that is
+  // room for two whole addresses
+  const cols = "md:grid-cols-[0.75rem_8rem_minmax(0,10rem)_minmax(0,1fr)_minmax(0,9rem)_7.5rem_3.5rem]";
+  const loading = rows.length === 0 && (ticking || indexed.loading);
+
+  return (
+    <EvmShell network={network}>
+      <section className="flex flex-col gap-4">
+        {/* the C-Chain's shared-memory transfers are this tab's second view */}
+        <SectionHeader label="Transactions" action={<TxsViewSwitch base={base} slug={c.chainSlug} view="evm" />} />
+        <Board divide={false} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}>
+          <div className={cn(HEAD, cols, "border-b border-zinc-200 dark:border-zinc-800")}>
+            <span />
+            <span>Hash</span>
+            <span>Method</span>
+            <span>From → To</span>
+            <span className="text-right">Value</span>
+            <span className="text-right">Fee</span>
+            <span className="text-right">Age</span>
+          </div>
+          {loading && <RowSkeleton n={12} />}
+          {!loading && rows.length === 0 && (
+            <div className="px-5 py-5 font-mono text-[11px] text-zinc-400 md:px-6 dark:text-zinc-500">no transactions</div>
+          )}
+          <Belt rows={ticking ? LIVE_ROWS : rows.length}>
+            {rows.map((t, i) => {
+              const mth = method(t);
+              const value = Number(t.value);
+              const tok = t.to ? tokens.get(t.to.toLowerCase()) : undefined;
+              return (
+                <MotionRow key={t.hash} animateIn={ticking && !opening.has(t.hash)} overflow={i >= LIVE_ROWS}>
+                  <RowDoor href={`${base}/tx/${t.hash}`} className={cn(ROW, cols)}>
+                    <span className="flex h-3 w-3 items-center justify-center">
+                      {!t.success && <X className="h-3 w-3 text-[#E6212F]" strokeWidth={2.5} aria-label="reverted" />}
+                    </span>
+                    <Link href={`${base}/tx/${t.hash}`} className={cn(INK, idInk, "truncate hover:text-[#E6212F]")} onClick={(e) => e.stopPropagation()}>
+                      {truncate(t.hash, 8)}
+                    </Link>
+                    <span
+                      className={cn("truncate font-mono text-[12px]", mth.named ? fnInk : "text-zinc-400 dark:text-zinc-500")}
+                      title={t.methodId || undefined}
+                    >
+                      <CellLabel>Method</CellLabel>
+                      {mth.label}
+                    </span>
+                    <span className="col-span-2 flex min-w-0 items-center gap-2 font-mono text-[12px] text-zinc-500 md:col-span-1 dark:text-zinc-400">
+                      <CellLabel>From → To</CellLabel>
+                      <Party addr={t.from} name={null} href={`${base}/address/${t.from}`} full column />
+                      <span className="shrink-0 text-zinc-300 dark:text-zinc-700">→</span>
+                      {t.to ? (
+                        <Party addr={t.to} name={contracts.get(t.to.toLowerCase())?.name} token={tok} chainId={c.chainId} href={`${base}/address/${t.to}`} full />
+                      ) : (
+                        <span className="truncate">contract creation</span>
+                      )}
+                    </span>
+                    <span className="min-w-0 truncate font-mono text-[12.5px] tabular-nums md:text-right">
+                      <CellLabel>Value</CellLabel>
+                      {value > 0 ? (
+                        <span className="text-zinc-900 dark:text-zinc-50">
+                          {fmtAmount(value / 1e18)}{" "}
+                          <span className="text-[11px] text-zinc-400 dark:text-zinc-500">{sym}</span>
+                          {usdOfWei(t.value, usd) && !usdOfWei(t.value, usd)!.startsWith("<") && (
+                            <span className="ml-2 text-[11px] text-zinc-400 dark:text-zinc-500">{usdOfWei(t.value, usd)}</span>
+                          )}
+                        </span>
+                      ) : t.tokenAmount ? (
+                        <span className="text-zinc-900 dark:text-zinc-50" title={t.tokenAmount}>
+                          {t.tokenAmount}
+                        </span>
+                      ) : (
+                        <span className="text-zinc-300 dark:text-zinc-700">—</span>
+                      )}
+                    </span>
+                    <span className={cn("font-mono text-[12.5px] tabular-nums md:text-right", feeInk)}>
+                      <CellLabel>Fee</CellLabel>
+                      {t.feeWei !== null ? (
+                        <>
+                          {(t.feeWei / 1e18).toFixed(6)} <span className="text-[11px] text-zinc-400 dark:text-zinc-500">{sym}</span>
+                        </>
+                      ) : (
+                        <span className="text-zinc-300 dark:text-zinc-700">—</span>
+                      )}
+                    </span>
+                    <span className={cn(MUTED, "text-right")}>
+                      <CellLabel>Age</CellLabel>
+                      {t.timestamp ? ageShort(t.timestamp) : ""}
+                    </span>
+                  </RowDoor>
+                </MotionRow>
+              );
+            })}
+          </Belt>
+        </Board>
+        {!ticking && !indexed.loading && rows.length >= limit && limit < MAX && (
+          <button
+            onClick={() => setLimit((l) => Math.min(l + PAGE, MAX))}
+            className="mx-auto border border-zinc-200 px-5 py-2 font-mono text-[11px] uppercase tracking-[0.14em] text-zinc-600 transition-colors hover:border-zinc-900 hover:text-zinc-900 dark:border-zinc-800 dark:text-zinc-300 dark:hover:border-zinc-100 dark:hover:text-zinc-100"
+          >
+            Load more
+          </button>
+        )}
+        {ticking && (
+          <p className="font-mono text-[10px] text-zinc-400 dark:text-zinc-500">
+            live: receipts read from the RPC as they are written · the newest {LIVE_ROWS} on screen, older ones on the address and block pages
+          </p>
+        )}
+      </section>
+
+      {/* the shape of the feed over time */}
+      <div className="mt-10 grid items-start gap-x-8 gap-y-10 lg:grid-cols-2">
+        <ChartSection label={`Transactions · ${RANGE_LABEL.month}`} action={<OverlayKey label="avg tps" dashed />}>
+          {metricSeries(m, range, "txCount", "avgTps").length ? (
+            <DualChart
+              data={metricSeries(m, range, "txCount", "avgTps")}
+              kind="bars"
+              fmt={fmtCompact}
+              aLabel="txs"
+              bLabel="avg TPS"
+              bFmt={(v) => v.toFixed(1)}
+              bOwnAxis
+            />
+          ) : (
+            <ChartEmpty failed={!!metrics || failed} />
+          )}
+        </ChartSection>
+
+        <ChartSection label={`Total Transactions · ${RANGE_LABEL.month}`}>
+          {metricSeries(m, range, "cumulativeTxCount").length ? (
+            <DualChart data={metricSeries(m, range, "cumulativeTxCount")} kind="area" fmt={fmtCompact} aLabel="txs all-time" />
+          ) : (
+            <ChartEmpty failed={!!metrics || failed} />
+          )}
+        </ChartSection>
+      </div>
+    </EvmShell>
+  );
+}

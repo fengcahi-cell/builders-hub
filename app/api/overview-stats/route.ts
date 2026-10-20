@@ -1,42 +1,81 @@
 import { NextResponse } from 'next/server';
-import l1ChainsData from "@/constants/l1-chains.json";
 import { STATS_CONFIG } from "@/types/stats";
 import { getChainICMCount } from "@/lib/icm-clickhouse";
+import { DEDICATED_STATS_BASE_URL, toStatsChainId } from "@/lib/dedicated-stats";
+import { pchainPost } from "@/lib/pchain-rpc";
+import { latestComplete, sumComplete } from "@/lib/stats-windows";
+import { fetchAllSubnets, fetchSubnetsById, runningL1Count, type RegistrySubnet } from "@/lib/pchain-subnets";
+import { fetchIndexedChainIds } from "@/lib/stats-coverage";
+import { isPchainNetwork, type PchainNetwork } from "@/lib/pchain-explorer";
+import { activeChains } from "@/lib/explorer-catalog";
+import { PRIMARY_SUBNET_ID } from "@/lib/pchain-node";
 
 export const dynamic = 'force-dynamic';
 
-const SECONDS_PER_DAY = 24 * 60 * 60;
+const SECONDS_PER_HOUR = 60 * 60;
+const SECONDS_PER_DAY = 24 * SECONDS_PER_HOUR;
 const CACHE_CONTROL_HEADER = 'public, max-age=14400, s-maxage=14400, stale-while-revalidate=86400';
 const REQUEST_TIMEOUT_MS = 8000;
 const MAX_CONCURRENT_CHAINS = 10;
-const METRICS_API_URL = process.env.METRICS_API_URL;
-if (!METRICS_API_URL) {
-  console.warn('METRICS_API_URL is not set — overview-stats endpoint will fail');
-}
+const STATS_API_URL = DEDICATED_STATS_BASE_URL;
 
+// P-Chain is the authority on how many L1s exist, and it answers for every
+// subnet whether or not we index it. Chain *counts* must come from here, not
+// from how many chains we happen to have figures for (lib/pchain-rpc.ts).
+// A "network" param ("mainnet", the default, or "fuji") picks the chains and
+// the P-Chain; every cache below keys by it.
+
+// days = daily buckets to pull from the stats API (the window and a 2-day
+// buffer). "day" reads hourly buckets instead: the explorer labels it
+// "24 hours", so it sums the last 24 complete hours. secondsInRange divides
+// the summed txCount into tps and gives the number of buckets to sum: one
+// source of truth per range.
 const TIME_RANGE_CONFIG = {
   day: { days: 3, secondsInRange: SECONDS_PER_DAY },
   week: { days: 9, secondsInRange: 7 * SECONDS_PER_DAY },
-  month: { days: 32, secondsInRange: 30 * SECONDS_PER_DAY }
+  month: { days: 32, secondsInRange: 30 * SECONDS_PER_DAY },
+  quarter: { days: 92, secondsInRange: 90 * SECONDS_PER_DAY },
+  year: { days: 367, secondsInRange: 365 * SECONDS_PER_DAY }
 } as const;
 
 type TimeRangeKey = keyof typeof TIME_RANGE_CONFIG;
 
 interface MetricResult { timestamp: number; value: number; }
+
+/**
+ * One figure from the metrics API.
+ *
+ * `v: null` means we have no number, and it must never render as 0. A chain we
+ * do not index and a chain that genuinely had no transactions are different facts.
+ */
+interface Metric { v: number | null; ok: boolean }
+const NO_DATA: Metric = { v: null, ok: true };
+const UNAVAILABLE: Metric = { v: null, ok: false };
+
+/**
+ * A 4xx from the metrics API means it does not track this chain, not that it is
+ * having trouble. Those chains are genuinely unindexed and should say so. 5xx and
+ * network failures are outages and stay unavailable.
+ */
+const isNotTracked = (status: number) => status >= 400 && status < 500;
+
 interface ChainOverviewMetrics {
   chainId: string;
   chainName: string;
   chainLogoURI: string;
-  txCount: number;
-  tps: number;
-  activeAddresses: number;
-  icmMessages: number;
+  txCount: number | null;
+  tps: number | null;
+  activeAddresses: number | null;
+  icmMessages: number | null;
   marketCap: number | null;
+  volume24h: number | null;
   validatorCount: number | string;
+  metricsOk: boolean;
 }
 
 interface OverviewMetrics {
   chains: ChainOverviewMetrics[];
+  coverage: { indexed: number; total: number };
   aggregated: {
     totalTxCount: number;
     totalTps: number;
@@ -48,6 +87,7 @@ interface OverviewMetrics {
     // Active L1s from P-Chain (source of truth). Falls back to enriched chain
     // count if P-Chain is unreachable.
     activeL1Count: number;
+    contributors: { txCount: number; activeAddresses: number; icmMessages: number };
   };
   timeRange: TimeRangeKey;
   last_updated: number;
@@ -85,123 +125,209 @@ async function processInBatches<T, R>(items: T[], processor: (item: T) => Promis
   return results;
 }
 
-function sortByTimestampDesc<T extends { timestamp: number }>(items: T[]): T[] {
-  return [...items].sort((a, b) => b.timestamp - a.timestamp);
+/**
+ * How many L1s are live on the network, straight from P-Chain.
+ *
+ * `getAllValidatorsAt` at height `proposed` returns the validator set per
+ * subnet, and a subnet with a non-empty set is running. Deliberately not
+ * `getCurrentValidators`: that lists registered validators regardless of state,
+ * so under ACP-77 it reports healthy-looking sets for chains whose L1 validators
+ * have run out of fee balance. The running sets are the ones
+ * scripts/enrich-chains.ts marks isActive; legacy subnets (gunz, StepNetwork)
+ * run sets too, so the count keeps only the subnets the subnet list marks
+ * isL1, as /api/validator-stats and /api/l1-registry's totals.activeL1s do.
+ *
+ * Returns null if P-Chain is unreachable; the caller falls back rather than
+ * publishing a count it did not verify.
+ */
+const l1CountCache = new Map<PchainNetwork, { counts: Map<string, number>; at: number }>();
+// one P-Chain read per network at a time: every chain's row asks for the sets at once
+const pendingSets = new Map<PchainNetwork, Promise<Map<string, number> | null>>();
+
+async function getPChainValidatorCounts(network: PchainNetwork): Promise<Map<string, number> | null> {
+  const fresh = await loadPChainValidatorSets(network);
+  return fresh;
 }
 
-function sumValues(sorted: MetricResult[], daysToSum: number): number {
-  let sum = 0;
-  for (let i = 1; i <= Math.min(daysToSum, sorted.length - 1); i++) {
-    sum += sorted[i]?.value || 0;
+async function getActiveL1CountFromPChain(network: PchainNetwork): Promise<number | null> {
+  const sets = loadPChainValidatorSets(network);
+  // mainnet reads its subnet list beside the sets; Fuji names the sets it gets
+  const [counts, subnets] = await Promise.all([
+    sets,
+    network === 'fuji' ? sets.then((c) => (c ? loadSubnets(network, c) : null)) : loadSubnets(network, null),
+  ]);
+  if (!counts || !subnets) return null;
+  return runningL1Count(counts, subnets);
+}
+
+// the subnet list moves only when a subnet is created or converted: read
+// hourly, the last good list kept through a failure. Fuji has ~8,000 subnets
+// (80 pages), so it names only its running sets, by ID, on each read: those
+// reads keep their own hour cache, and a set that starts running counts at once.
+const SUBNETS_TTL_MS = 60 * 60 * 1000;
+const subnetsCache = new Map<PchainNetwork, { subnets: RegistrySubnet[]; at: number }>();
+
+async function loadSubnets(network: PchainNetwork, counts: Map<string, number> | null): Promise<RegistrySubnet[] | null> {
+  const hit = subnetsCache.get(network);
+  if (network === 'mainnet' && hit && Date.now() - hit.at < SUBNETS_TTL_MS) return hit.subnets;
+  try {
+    const running = [...(counts?.keys() ?? [])].filter((id) => id !== PRIMARY_SUBNET_ID);
+    const subnets = network === 'fuji' ? await fetchSubnetsById(network, running) : await fetchAllSubnets(network);
+    if (network === 'fuji' && running.length > 0 && subnets.length === 0) throw new Error('no fuji subnet answered');
+    subnetsCache.set(network, { subnets, at: Date.now() });
+    return subnets;
+  } catch (error) {
+    console.error(`[loadSubnets] ${network} failed:`, error);
+    return hit?.subnets ?? null;
   }
-  return sum;
 }
 
-function getAllChains(): ChainInfo[] {
-  return l1ChainsData
-    .filter(chain =>
-      !('isTestnet' in chain && chain.isTestnet === true) &&
-      !('isActive' in chain && chain.isActive === false)
-    )
-    .map(chain => ({
-      chainId: chain.chainId,
-      chainName: chain.chainName,
-      logoUri: chain.chainLogoURI || '',
-      subnetId: chain.subnetId,
-      ...('coingeckoId' in chain && chain.coingeckoId ? { coingeckoId: chain.coingeckoId as string } : {}),
-    }));
+function loadPChainValidatorSets(network: PchainNetwork): Promise<Map<string, number> | null> {
+  const hit = l1CountCache.get(network);
+  if (hit && Date.now() - hit.at < STATS_CONFIG.CACHE.SHORT_DURATION) {
+    return Promise.resolve(hit.counts);
+  }
+  let pending = pendingSets.get(network);
+  if (!pending) {
+    pending = readPChainValidatorSets(network);
+    pendingSets.set(network, pending);
+    void pending.finally(() => pendingSets.delete(network));
+  }
+  return pending;
 }
 
-async function getTxCountData(chainId: string, timeRange: TimeRangeKey): Promise<number> {
+async function readPChainValidatorSets(network: PchainNetwork): Promise<Map<string, number> | null> {
+  try {
+    const res = await pchainPost(network, {
+      jsonrpc: '2.0', id: 1,
+      method: 'platform.getAllValidatorsAt',
+      params: { height: 'proposed' },
+    }, REQUEST_TIMEOUT_MS);
+    if (!res.ok) throw new Error(`p-chain ${res.status}`);
+    const body = await res.json();
+    const sets = body?.result?.validatorSets;
+    if (!sets || typeof sets !== 'object') throw new Error('unexpected p-chain response');
+    const counts = new Map<string, number>();
+    for (const [subnetId, set] of Object.entries(sets)) {
+      const validators = (set as { validators?: unknown[] })?.validators;
+      if (!Array.isArray(validators) || validators.length === 0) continue;
+      counts.set(subnetId, validators.length);
+    }
+    l1CountCache.set(network, { counts, at: Date.now() });
+    return counts;
+  } catch (error) {
+    console.error(`[loadPChainValidatorSets] ${network} failed:`, error);
+    // a busy or rate-limited P-Chain serves the last good sets rather than none,
+    // so the city keeps its buildings through a 429
+    return l1CountCache.get(network)?.counts ?? null;
+  }
+}
+
+/** the network's active catalog chains: the testnet ones for Fuji */
+function getAllChains(network: PchainNetwork): ChainInfo[] {
+  return activeChains({ testnet: network === 'fuji' }).map(chain => ({
+    chainId: chain.chainId,
+    chainName: chain.chainName,
+    logoUri: chain.chainLogoURI || '',
+    subnetId: chain.subnetId,
+    ...(chain.coingeckoId ? { coingeckoId: chain.coingeckoId } : {}),
+  }));
+}
+
+async function getTxCountData(chainId: string, timeRange: TimeRangeKey): Promise<Metric> {
   try {
     const config = TIME_RANGE_CONFIG[timeRange];
+    const hourly = timeRange === 'day';
     const endTimestamp = Math.floor(Date.now() / 1000);
-    const startTimestamp = endTimestamp - (config.days * SECONDS_PER_DAY);
+    // the day's 24 hours and a 2-hour buffer, or the window's days and their buffer
+    const span = hourly ? config.secondsInRange / SECONDS_PER_HOUR + 2 : config.days;
+    const startTimestamp = endTimestamp - span * (hourly ? SECONDS_PER_HOUR : SECONDS_PER_DAY);
 
-    const url = new URL(`${METRICS_API_URL}/v2/chains/${chainId}/metrics/txCount`);
-    url.searchParams.set('timeInterval', 'day');
+    const url = new URL(`${STATS_API_URL}/v2/chains/${toStatsChainId(chainId)}/metrics/txCount`);
+    url.searchParams.set('timeInterval', hourly ? 'hour' : 'day');
     url.searchParams.set('startTimestamp', String(startTimestamp));
     url.searchParams.set('endTimestamp', String(endTimestamp));
-    url.searchParams.set('pageSize', String(config.days + 1));
+    url.searchParams.set('pageSize', String(span + 1));
 
     const res = await fetchWithTimeout(url.toString());
-    if (!res.ok) throw new Error(`metrics-api ${res.status}`);
+    if (!res.ok) {
+      if (isNotTracked(res.status)) return NO_DATA;
+      throw new Error(`metrics-api ${res.status}`);
+    }
     const data = await res.json();
 
-    const allResults: MetricResult[] = data.results || [];
-    const sorted = sortByTimestampDesc(allResults);
-    if (sorted.length === 0) return 0;
-    if (sorted.length === 1) return sorted[0]?.value || 0;
-    if (timeRange === 'day') return sorted[1]?.value || 0;
-    return sumValues(sorted, timeRange === 'week' ? 7 : 30);
+    // every stored bucket is a complete period: the newest counts too
+    const results: MetricResult[] = data.results || [];
+    const sum = hourly
+      ? sumComplete(results, 'hour', config.secondsInRange / SECONDS_PER_HOUR, endTimestamp)
+      : sumComplete(results, 'day', config.secondsInRange / SECONDS_PER_DAY, endTimestamp);
+    return sum === null ? NO_DATA : { v: sum, ok: true };
   } catch (error) {
     console.error(`[getTxCountData] Failed for chain ${chainId}:`, error);
-    return 0;
+    return UNAVAILABLE;
   }
 }
 
-async function getActiveAddressesData(chainId: string, timeRange: TimeRangeKey): Promise<number> {
+async function getActiveAddressesData(chainId: string, timeRange: TimeRangeKey): Promise<Metric> {
   try {
     const endTimestamp = Math.floor(Date.now() / 1000);
-    const startTimestamp = endTimestamp - (30 * SECONDS_PER_DAY);
 
-    const url = new URL(`${METRICS_API_URL}/v2/chains/${chainId}/metrics/activeAddresses`);
-    url.searchParams.set('timeInterval', timeRange);
+    // active addresses is a distinct count, not a sum: the API only buckets it
+    // by day/week/month, so quarter and year (no wider bucket exists) read the
+    // monthly figure rather than an unsupported interval.
+    //
+    // 'month' has to be in this set too. It asks for monthly buckets like the
+    // other two, so it needs the same widened lookback.
+    const isMonthly = timeRange === 'month' || timeRange === 'quarter' || timeRange === 'year';
+    const interval = isMonthly ? 'month' : timeRange;
+    const startTimestamp = endTimestamp - ((isMonthly ? 65 : 30) * SECONDS_PER_DAY);
+
+    const url = new URL(`${STATS_API_URL}/v2/chains/${toStatsChainId(chainId)}/metrics/activeAddresses`);
+    url.searchParams.set('timeInterval', interval);
     url.searchParams.set('startTimestamp', String(startTimestamp));
     url.searchParams.set('endTimestamp', String(endTimestamp));
     url.searchParams.set('pageSize', '2');
 
     const res = await fetchWithTimeout(url.toString());
-    if (!res.ok) throw new Error(`metrics-api ${res.status}`);
+    if (!res.ok) {
+      if (isNotTracked(res.status)) return NO_DATA;
+      throw new Error(`metrics-api ${res.status}`);
+    }
     const data = await res.json();
 
-    const allResults: MetricResult[] = data.results || [];
-    const sorted = sortByTimestampDesc(allResults);
-    const dataPoint = sorted.length > 1 ? sorted[1] : sorted[0];
-    return dataPoint?.value || 0;
+    // a distinct count, so one bucket: the latest complete period's, never an older one
+    const dataPoint = latestComplete(data.results || [], interval, endTimestamp);
+    if (!dataPoint) return NO_DATA;
+    return { v: dataPoint.value ?? 0, ok: true };
   } catch (error) {
     console.error(`[getActiveAddressesData] Failed for chain ${chainId}:`, error);
-    return 0;
+    return UNAVAILABLE;
   }
 }
 
-async function getICMData(chainId: string, timeRange: TimeRangeKey): Promise<number> {
+async function getICMData(chainId: string, timeRange: TimeRangeKey): Promise<Metric> {
   try {
-    const daysToSum = timeRange === 'day' ? 1 : timeRange === 'week' ? 7 : 30;
-    return await getChainICMCount(chainId, daysToSum);
+    const daysToSum = TIME_RANGE_CONFIG[timeRange].secondsInRange / SECONDS_PER_DAY;
+    const count = await getChainICMCount(chainId, daysToSum);
+    return typeof count === 'number' ? { v: count, ok: true } : NO_DATA;
   } catch (error) {
     console.error(`[getICMData] Failed for chain ${chainId}:`, error);
-    return 0;
+    return UNAVAILABLE;
   }
 }
 
-// TODO: migrate to metrics-api when it supports validatorCount (currently a stub)
-async function getValidatorCount(subnetId: string): Promise<number | string> {
+async function getValidatorCount(subnetId: string, network: PchainNetwork): Promise<number | string> {
   if (!subnetId || subnetId === "N/A") return "N/A";
-
-  try {
-    const url = new URL('https://metrics.avax.network/v2/networks/mainnet/metrics/validatorCount');
-    url.searchParams.set('pageSize', '1');
-    url.searchParams.set('subnetId', subnetId);
-    
-    const response = await fetchWithTimeout(url.toString(), { headers: { 'Accept': 'application/json' } });
-    if (!response.ok) return "N/A";
-
-    const data = await response.json();
-    const value = data?.results?.[0]?.value;
-    return value ? Number(value) : "N/A";
-  } catch (error) {
-    if (error instanceof Error && error.name !== 'AbortError') {
-      console.error(`[getValidatorCount] Failed for subnet ${subnetId}:`, error);
-    }
-    return "N/A";
-  }
+  const counts = await getPChainValidatorCounts(network);
+  if (!counts) return "N/A";
+  return counts.get(subnetId) ?? 0;
 }
 
 const MARKET_CAP_CACHE_DURATION = 5 * 60 * 1000; // 5 minutes
-let marketCapCache: { data: Record<string, number>; timestamp: number } | null = null;
+interface TokenMarketData { mcap: number; vol: number | null }
+let marketCapCache: { data: Record<string, TokenMarketData>; timestamp: number } | null = null;
 
-async function fetchMarketCaps(chains: ChainInfo[]): Promise<Record<string, number>> {
+async function fetchMarketCaps(chains: ChainInfo[]): Promise<Record<string, TokenMarketData>> {
   if (marketCapCache && Date.now() - marketCapCache.timestamp < MARKET_CAP_CACHE_DURATION) {
     return marketCapCache.data;
   }
@@ -215,7 +341,7 @@ async function fetchMarketCaps(chains: ChainInfo[]): Promise<Record<string, numb
   try {
     const ids = coingeckoIds.join(',');
     const response = await fetchWithTimeout(
-      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_market_cap=true`,
+      `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=usd&include_market_cap=true&include_24hr_vol=true`,
       { headers: { 'Accept': 'application/json' } },
       10000
     );
@@ -223,12 +349,13 @@ async function fetchMarketCaps(chains: ChainInfo[]): Promise<Record<string, numb
     if (!response.ok) return marketCapCache?.data ?? {};
 
     const data = await response.json();
-    const result: Record<string, number> = {};
+    const result: Record<string, TokenMarketData> = {};
 
     for (const [coingeckoId, values] of Object.entries(data)) {
       const mcap = (values as any)?.usd_market_cap;
+      const vol = (values as any)?.usd_24h_vol;
       if (typeof mcap === 'number' && mcap > 0) {
-        result[coingeckoId] = mcap;
+        result[coingeckoId] = { mcap, vol: typeof vol === 'number' && vol > 0 ? vol : null };
       }
     }
 
@@ -240,8 +367,9 @@ async function fetchMarketCaps(chains: ChainInfo[]): Promise<Record<string, numb
   }
 }
 
-async function fetchChainMetrics(chain: ChainInfo, timeRange: TimeRangeKey): Promise<ChainOverviewMetrics | null> {
-  const cacheKey = `${chain.chainId}-${timeRange}`;
+/** one chain's row; a chain stats-api does not index (indexed false) gets no figures and costs no request */
+async function fetchChainMetrics(chain: ChainInfo, timeRange: TimeRangeKey, network: PchainNetwork, indexed: boolean): Promise<ChainOverviewMetrics | null> {
+  const cacheKey = `${network}:${chain.chainId}-${timeRange}`;
   const cached = chainDataCache.get(cacheKey);
   
   if (cached && Date.now() - cached.timestamp < STATS_CONFIG.CACHE.SHORT_DURATION) {
@@ -250,22 +378,24 @@ async function fetchChainMetrics(chain: ChainInfo, timeRange: TimeRangeKey): Pro
 
   try {
     const [txCount, activeAddresses, icmMessages, validatorCount] = await Promise.all([
-      getTxCountData(chain.chainId, timeRange),
-      getActiveAddressesData(chain.chainId, timeRange),
-      getICMData(chain.chainId, timeRange),
-      getValidatorCount(chain.subnetId),
+      indexed ? getTxCountData(chain.chainId, timeRange) : NO_DATA,
+      indexed ? getActiveAddressesData(chain.chainId, timeRange) : NO_DATA,
+      indexed ? getICMData(chain.chainId, timeRange) : NO_DATA,
+      getValidatorCount(chain.subnetId, network),
     ]);
 
     const result: ChainOverviewMetrics = {
       chainId: chain.chainId,
       chainName: chain.chainName,
       chainLogoURI: chain.logoUri,
-      txCount,
-      tps: txCount / TIME_RANGE_CONFIG[timeRange].secondsInRange,
-      activeAddresses,
-      icmMessages,
+      txCount: txCount.v,
+      tps: txCount.v === null ? null : txCount.v / TIME_RANGE_CONFIG[timeRange].secondsInRange,
+      activeAddresses: activeAddresses.v,
+      icmMessages: icmMessages.v,
       marketCap: null,
+      volume24h: null,
       validatorCount,
+      metricsOk: txCount.ok && activeAddresses.ok && icmMessages.ok,
     };
 
     chainDataCache.set(cacheKey, { data: result, timestamp: Date.now() });
@@ -276,14 +406,29 @@ async function fetchChainMetrics(chain: ChainInfo, timeRange: TimeRangeKey): Pro
   }
 }
 
-async function fetchFreshDataInternal(timeRange: TimeRangeKey): Promise<OverviewMetrics | null> {
+// the last indexed list stats-api gave: a read that does not answer keeps it,
+// and with none, Fuji asks no chain rather than ~170 that fail
+let lastFujiIndexedIds: Set<string> | null = null;
+
+async function loadFujiIndexedIds(): Promise<Set<string>> {
+  const fresh = await fetchIndexedChainIds();
+  if (fresh) lastFujiIndexedIds = fresh;
+  return lastFujiIndexedIds ?? new Set();
+}
+
+async function fetchFreshDataInternal(timeRange: TimeRangeKey, network: PchainNetwork): Promise<OverviewMetrics | null> {
   try {
     const startTime = Date.now();
-    const allChains = getAllChains();
-    
+    const allChains = getAllChains(network);
+    // stats-api indexes 3 of Fuji's ~170 chains, and each other chain would
+    // cost two failing requests. Mainnet asks for every chain.
+    const indexedIds = network === 'fuji' ? await loadFujiIndexedIds() : null;
+    const isIndexed = (chain: ChainInfo) => !indexedIds || indexedIds.has(toStatsChainId(chain.chainId));
+
+    // testnet tokens have no market price, and the market cap cache holds mainnet's
     const [chainResults, marketCaps] = await Promise.all([
-      processInBatches(allChains, (chain) => fetchChainMetrics(chain, timeRange), MAX_CONCURRENT_CHAINS),
-      fetchMarketCaps(allChains),
+      processInBatches(allChains, (chain) => fetchChainMetrics(chain, timeRange, network, isIndexed(chain)), MAX_CONCURRENT_CHAINS),
+      network === 'mainnet' ? fetchMarketCaps(allChains) : Promise.resolve<Record<string, TokenMarketData>>({}),
     ]);
     const chainMetrics = chainResults
       .filter((r): r is PromiseFulfilledResult<ChainOverviewMetrics> => r.status === 'fulfilled' && r.value !== null)
@@ -296,44 +441,47 @@ async function fetchFreshDataInternal(timeRange: TimeRangeKey): Promise<Overview
         coingeckoToChainId.set(chain.coingeckoId, chain.chainId);
       }
     }
-    for (const [coingeckoId, mcap] of Object.entries(marketCaps)) {
+    for (const [coingeckoId, market] of Object.entries(marketCaps)) {
       const chainId = coingeckoToChainId.get(coingeckoId);
       if (chainId) {
         const chainMetric = chainMetrics.find(c => c.chainId === chainId);
         if (chainMetric) {
-          chainMetric.marketCap = mcap;
+          chainMetric.marketCap = market.mcap;
+          chainMetric.volume24h = market.vol;
         }
       }
     }
 
     const aggregated = chainMetrics.reduce((acc, chain) => {
-      acc.totalTxCount += chain.txCount || 0;
-      acc.totalActiveAddresses += chain.activeAddresses || 0;
-      acc.totalICMMessages += chain.icmMessages || 0;
+      if (chain.txCount !== null) { acc.totalTxCount += chain.txCount; acc.contributors.txCount++; }
+      if (chain.activeAddresses !== null) { acc.totalActiveAddresses += chain.activeAddresses; acc.contributors.activeAddresses++; }
+      if (chain.icmMessages !== null) { acc.totalICMMessages += chain.icmMessages; acc.contributors.icmMessages++; }
       acc.totalMarketCap += chain.marketCap ?? 0;
       if (typeof chain.validatorCount === 'number') acc.totalValidators += chain.validatorCount;
-      if (chain.txCount > 0 || chain.activeAddresses > 0) acc.activeChains++;
+      if ((chain.txCount ?? 0) > 0 || (chain.activeAddresses ?? 0) > 0) acc.activeChains++;
       return acc;
-    }, { totalTxCount: 0, totalActiveAddresses: 0, totalICMMessages: 0, totalMarketCap: 0, totalValidators: 0, activeChains: 0 });
+    }, {
+      totalTxCount: 0, totalActiveAddresses: 0, totalICMMessages: 0,
+      totalMarketCap: 0, totalValidators: 0, activeChains: 0,
+      contributors: { txCount: 0, activeAddresses: 0, icmMessages: 0 },
+    });
+
+    const covered = chainMetrics.filter((c) => c.txCount !== null || c.activeAddresses !== null).length;
 
     const metrics: OverviewMetrics = {
       chains: chainMetrics,
+      coverage: { indexed: covered, total: chainMetrics.length },
       aggregated: {
         ...aggregated,
         totalTps: aggregated.totalTxCount / TIME_RANGE_CONFIG[timeRange].secondsInRange,
-        // Headline count is the same set the table renders below — every
-        // mainnet entry from l1-chains.json with isActive !== false. The
-        // l1-chains.json catalog itself is seeded by P-Chain at build time
-        // via scripts/enrich-chains.mts, so this number transitively reflects
-        // P-Chain truth without a runtime P-Chain dependency.
-        activeL1Count: chainMetrics.length,
+        activeL1Count: (await getActiveL1CountFromPChain(network)) ?? chainMetrics.length,
       },
       timeRange,
       last_updated: Date.now()
     };
 
-    cachedData.set(timeRange, { data: metrics, timestamp: Date.now() });
-    console.log(`[fetchFreshData] Completed in ${Date.now() - startTime}ms, ${chainMetrics.length}/${allChains.length} chains`);
+    cachedData.set(`${network}:${timeRange}`, { data: metrics, timestamp: Date.now() });
+    console.log(`[fetchFreshData] ${network} completed in ${Date.now() - startTime}ms, ${chainMetrics.length}/${allChains.length} chains`);
     return metrics;
   } catch (error) {
     console.error('[fetchFreshData] Failed:', error);
@@ -341,13 +489,13 @@ async function fetchFreshDataInternal(timeRange: TimeRangeKey): Promise<Overview
   }
 }
 
-async function fetchFreshData(timeRange: TimeRangeKey): Promise<{ data: OverviewMetrics; fetchTime: number; chainCount: number } | null> {
+async function fetchFreshData(timeRange: TimeRangeKey, network: PchainNetwork): Promise<{ data: OverviewMetrics; fetchTime: number; chainCount: number } | null> {
   const startTime = Date.now();
-  const pendingKey = `fresh-${timeRange}`;
+  const pendingKey = `fresh-${network}-${timeRange}`;
   let pendingPromise = pendingRequests.get(pendingKey);
   
   if (!pendingPromise) {
-    pendingPromise = fetchFreshDataInternal(timeRange);
+    pendingPromise = fetchFreshDataInternal(timeRange, network);
     pendingRequests.set(pendingKey, pendingPromise);
     pendingPromise.finally(() => pendingRequests.delete(pendingKey));
   }
@@ -363,7 +511,8 @@ function createResponse(
   meta: { source: string; timeRange?: TimeRangeKey; cacheAge?: number; fetchTime?: number; chainCount?: number },
   status = 200
 ) {
-  const headers: Record<string, string> = { 'Cache-Control': CACHE_CONTROL_HEADER, 'X-Data-Source': meta.source };
+  // an error is not kept, by a CDN or the browser
+  const headers: Record<string, string> = { 'Cache-Control': status >= 400 ? 'no-store' : CACHE_CONTROL_HEADER, 'X-Data-Source': meta.source };
   if (meta.timeRange) headers['X-Time-Range'] = meta.timeRange;
   if (meta.cacheAge !== undefined) headers['X-Cache-Age'] = `${Math.round(meta.cacheAge / 1000)}s`;
   if (meta.fetchTime !== undefined) headers['X-Fetch-Time'] = `${meta.fetchTime}ms`;
@@ -376,6 +525,11 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const timeRangeParam = searchParams.get('timeRange') || 'day';
     const timeRange: TimeRangeKey = timeRangeParam in TIME_RANGE_CONFIG ? (timeRangeParam as TimeRangeKey) : 'day';
+    const network = searchParams.get('network') ?? 'mainnet';
+    if (!isPchainNetwork(network)) {
+      return createResponse({ error: `unknown network '${network}'` }, { source: 'error' }, 400);
+    }
+    const key = `${network}:${timeRange}`;
     
     if (searchParams.get('clearCache') === 'true') {
       cachedData.clear();
@@ -383,14 +537,14 @@ export async function GET(request: Request) {
       revalidatingKeys.clear();
     }
     
-    const cached = cachedData.get(timeRange);
+    const cached = cachedData.get(key);
     const cacheAge = cached ? Date.now() - cached.timestamp : Infinity;
     const isCacheValid = cacheAge < STATS_CONFIG.CACHE.SHORT_DURATION;
     const isCacheStale = cached && !isCacheValid;
     
-    if (isCacheStale && !revalidatingKeys.has(timeRange)) {
-      revalidatingKeys.add(timeRange);
-      fetchFreshData(timeRange).finally(() => revalidatingKeys.delete(timeRange));
+    if (isCacheStale && !revalidatingKeys.has(key)) {
+      revalidatingKeys.add(key);
+      fetchFreshData(timeRange, network).finally(() => revalidatingKeys.delete(key));
       return createResponse(cached.data, { source: 'stale-while-revalidate', timeRange, cacheAge });
     }
     
@@ -398,7 +552,7 @@ export async function GET(request: Request) {
       return createResponse(cached.data, { source: 'cache', timeRange, cacheAge });
     }
     
-    const freshData = await fetchFreshData(timeRange);
+    const freshData = await fetchFreshData(timeRange, network);
     if (!freshData) {
       return createResponse({ error: 'Failed to fetch chain metrics' }, { source: 'error' }, 500);
     }

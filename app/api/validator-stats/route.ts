@@ -1,21 +1,39 @@
 import { NextResponse } from 'next/server';
-import { Avalanche } from "@avalanche-sdk/chainkit";
-import { type ActiveValidatorDetails } from '@avalanche-sdk/chainkit/models/components/activevalidatordetails.js';
-import { type Subnet } from '@avalanche-sdk/chainkit/models/components/subnet.js';
+import { EXPLORER_API_BASE } from "@/lib/pchain-explorer";
 import { type SimpleValidator, type ValidatorVersion, type SubnetStats } from '@/types/validator-stats';
 import { MAINNET_VALIDATOR_DISCOVERY_URL, FUJI_VALIDATOR_DISCOVERY_URL } from '@/constants/validator-discovery';
 import l1ChainsData from "@/constants/l1-chains.json";
+import { minorVersionLine } from "@/lib/node-version";
+import { fetchSubnetsById, seatsOf, type ValidatorSeat } from "@/lib/pchain-subnets";
+import { pchainPost } from "@/lib/pchain-rpc";
+import { PRIMARY_SUBNET_ID } from "@/lib/pchain-node";
+
+// Minimal subnet shape consumed from our /v1 subnets endpoint (Glacier-shape).
+// blockchains is null (Go nil slice) for subnets that never created a chain.
+type SubnetInfo = { subnetId: string; isL1: boolean; blockchains: { blockchainName: string }[] | null };
 
 export const dynamic = 'force-dynamic';
+// The cold aggregate paginates all L1 validators + subnets (pageSize capped at
+// 100 upstream). Those lists are cached 24h and the origin serves stale while
+// refreshing, so only a genuinely cold instance is slow — give it headroom so
+// it can't 504 and leave the cache empty.
+export const maxDuration = 60;
 
-const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours
-const VERSION_CACHE_DURATION = 24 * 60 * 60 * 1000;
+const LIST_CACHE_DURATION = 24 * 60 * 60 * 1000;
+const PARTIAL_CACHE_DURATION = 60 * 1000;
+const VERSION_CACHE_DURATION = 15 * 60 * 1000;
+const STATS_CACHE_DURATION = 15 * 60 * 1000;
 const PAGE_SIZE = 100;
-const FETCH_TIMEOUT = 10000;
-const CACHE_CONTROL_HEADER = 'public, max-age=86400, s-maxage=86400, stale-while-revalidate=172800';
+// Our /v1 validator/subnet endpoints have a heavy cold-start (validators ~10s,
+// subnets ~60s) before their state cache warms; give each page fetch generous
+// headroom so a cold window doesn't abort and blank the whole aggregate. The
+// warmer keeps them hot, so the steady-state path is sub-second.
+const FETCH_TIMEOUT = 60000;
+const CACHE_CONTROL_HEADER = 'public, max-age=0, s-maxage=900, stale-while-revalidate=3600';
+const PCHAIN_TIMEOUT = 10000;
 
 const validatorsCached: Partial<Record<string, { data: SimpleValidator[]; timestamp: number; promise?: Promise<SimpleValidator[]> }>> = {};
-const subnetsCached: Partial<Record<string, { data: Subnet[]; timestamp: number; promise?: Promise<Subnet[]> }>> = {};
+const subnetsCached: Partial<Record<string, { data: SubnetInfo[]; timestamp: number; promise?: Promise<SubnetInfo[]> }>> = {};
 const validatorVersionsCached: Partial<Record<string, { data: Map<string, string>; timestamp: number }>> = {};
 const statsCached: Partial<Record<string, { data: SubnetStats[]; timestamp: number }>> = {};
 const revalidatingKeys = new Set<string>();
@@ -35,49 +53,94 @@ async function fetchWithTimeout(url: string, timeout: number = FETCH_TIMEOUT): P
   }
 }
 
-async function listClassicValidators(network: "mainnet" | "fuji"): Promise<SimpleValidator[]> {
-  const avalancheSDK = new Avalanche({ network });
-  const validators: SimpleValidator[] = [];
-  
-  const result = await avalancheSDK.data.primaryNetwork.listValidators({
-    pageSize: PAGE_SIZE,
-    network,
-    validationStatus: "active",
-  });
-
-  for await (const page of result) {
-    const activeValidators = page.result.validators as ActiveValidatorDetails[];
-    validators.push(...activeValidators.map(v => ({
-      nodeId: v.nodeId,
-      subnetId: v.subnetId,
-      weight: Number(v.amountStaked)
-    })));
+// Fetch every page of a /v1 list endpoint (pageToken pagination), collecting the
+// named array field. Server-side, so it hits the plain-HTTP EXPLORER_API_BASE
+// directly. Replaces the Glacier SDK's async pager.
+async function fetchAllPages<T>(path: string, field: string): Promise<T[]> {
+  const out: T[] = [];
+  let pageToken: string | undefined;
+  for (let i = 0; i < 200; i++) {
+    const sep = path.includes("?") ? "&" : "?";
+    const tok = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "";
+    const res = await fetchWithTimeout(`${EXPLORER_API_BASE}${path}${sep}pageSize=${PAGE_SIZE}${tok}`);
+    if (!res.ok) throw new Error(`validators upstream ${res.status} for ${path}`);
+    const page = await res.json();
+    const arr: T[] = Array.isArray(page?.[field]) ? page[field] : [];
+    out.push(...arr);
+    pageToken = page?.nextPageToken;
+    if (!pageToken || arr.length < PAGE_SIZE) break;
   }
+  return out;
+}
 
-  return validators;
+async function listClassicValidators(network: "mainnet" | "fuji"): Promise<SimpleValidator[]> {
+  // Primary-network validators from the explorer-shape snapshot — ONE fast
+  // response (the whole current set), instead of paginating ~30 pages of the
+  // heavy /v1 validators endpoint (~3s/page → ~90s → 504). Same source the
+  // P-chain /validators page uses, so counts stay consistent.
+  const res = await fetchWithTimeout(`${EXPLORER_API_BASE}/api/${network}/validators`);
+  if (!res.ok) throw new Error(`validators upstream ${res.status}`);
+  const j = await res.json();
+  const vs: any[] = Array.isArray(j?.validators) ? j.validators : [];
+  return vs.map(v => ({
+    nodeId: v.nodeId,
+    subnetId: v.subnetId,
+    weight: Number(v.totalStake ?? v.weight),
+  }));
 }
 
 async function listL1Validators(network: "mainnet" | "fuji"): Promise<SimpleValidator[]> {
-  const avalancheSDK = new Avalanche({ network });
-  const validators: SimpleValidator[] = [];
-  
-  const result = await avalancheSDK.data.primaryNetwork.listL1Validators({
-    pageSize: PAGE_SIZE,
-    includeInactiveL1Validators: false,
-    network,
-  });
+  // Active L1 validators across all subnets from our P-chain read API.
+  //
+  // Upstream fixed 2026-07-24 (stats-api PR #8): the endpoint used to ship
+  // removed validators (weight-0 rows with stale balances — Coqnet reported
+  // 1,231 "active" vs 6 on the node) because the replay had ACP-77 removal
+  // and disable semantics inverted. The weight/balance filter below is kept
+  // as a cheap defense against regressions; post-fix it drops nothing the
+  // endpoint should have sent. Counts here are REGISTERED ACTIVE seats —
+  // remainingBalance is still gross of continuous-fee burn upstream, so
+  // drained-but-not-removed seats pass the balance check.
+  const vs = await fetchAllPages<any>(`/v1/networks/${network}/l1Validators?includeInactive=false`, "validators");
+  return vs
+    .filter(v => Number(v.weight) > 0 && Number(v.remainingBalance) > 0)
+    .map(v => ({
+      nodeId: v.nodeId,
+      subnetId: v.subnetId,
+      weight: Number(v.weight),
+    }));
+}
 
-  for await (const page of result) {
-    validators.push(...page.result.validators
-      .filter(v => v.remainingBalance > 0)
-      .map(v => ({
-        nodeId: v.nodeId,
-        subnetId: v.subnetId,
-        weight: v.weight
-      })));
+/* Fuji's L1 validators from the P-Chain's running sets, in one call. On
+   2026-10-07 three reads of the l1Validators list gave Fuji 318, about
+   13,000 and 411 rows (100 a page, 2.6 s a page when cold), and the P-Chain
+   ran ~330 seats. So a failed P-Chain read does not read the list: it
+   serves the last good result, or throws when there is none. A running set
+   counts only when its subnet read says L1 (see seatsOf). complete is false
+   when a subnet read failed or the last good result stands in. */
+let lastFujiL1: SimpleValidator[] | null = null;
+
+async function listFujiL1Validators(): Promise<{ validators: SimpleValidator[]; complete: boolean }> {
+  try {
+    const res = await pchainPost('fuji', {
+      jsonrpc: '2.0', id: 1,
+      method: 'platform.getAllValidatorsAt',
+      params: { height: 'proposed' },
+    }, PCHAIN_TIMEOUT);
+    if (!res.ok) throw new Error(`p-chain ${res.status}`);
+    const sets = (await res.json())?.result?.validatorSets;
+    if (!sets || typeof sets !== 'object') throw new Error('unexpected p-chain response');
+    const running = Object.entries(sets as Record<string, { validators?: ValidatorSeat[] } | null>)
+      .filter(([subnetId, set]) => subnetId !== PRIMARY_SUBNET_ID && (set?.validators?.length ?? 0) > 0)
+      .map(([subnetId]) => subnetId);
+    const subnets = await fetchSubnetsById('fuji', running);
+    const validators = seatsOf(sets, subnets);
+    lastFujiL1 = validators;
+    return { validators, complete: subnets.length === running.length };
+  } catch (error) {
+    if (!lastFujiL1) throw error;
+    console.error('[listFujiL1Validators] P-Chain read failed, serving the last good list:', error);
+    return { validators: lastFujiL1, complete: false };
   }
-
-  return validators;
 }
 
 async function getAllValidators(network: "mainnet" | "fuji"): Promise<SimpleValidator[]> {
@@ -85,7 +148,7 @@ async function getAllValidators(network: "mainnet" | "fuji"): Promise<SimpleVali
   const cache = validatorsCached[network];
 
   // Return cached data if still valid
-  if (cache && (now - cache.timestamp) < CACHE_DURATION) {
+  if (cache && (now - cache.timestamp) < LIST_CACHE_DURATION) {
     return cache.data;
   }
 
@@ -96,17 +159,17 @@ async function getAllValidators(network: "mainnet" | "fuji"): Promise<SimpleVali
 
   // Start new fetch
   const promise = (async () => {
-    const [l1Validators, classicValidators] = await Promise.all([
-      listL1Validators(network),
+    const [l1, classicValidators] = await Promise.all([
+      network === 'fuji' ? listFujiL1Validators() : listL1Validators(network).then(validators => ({ validators, complete: true })),
       listClassicValidators(network)
     ]);
 
-    const allValidators = [...l1Validators, ...classicValidators];
+    const allValidators = [...l1.validators, ...classicValidators];
     
-    // Store in cache with timestamp
+    // Store in cache with timestamp. An incomplete list holds for 60 s only, so the next request reads again.
     validatorsCached[network] = {
       data: allValidators,
-      timestamp: Date.now(),
+      timestamp: l1.complete ? Date.now() : Date.now() - LIST_CACHE_DURATION + PARTIAL_CACHE_DURATION,
     };
     
     return allValidators;
@@ -127,11 +190,11 @@ async function getAllValidators(network: "mainnet" | "fuji"): Promise<SimpleVali
   return promise;
 }
 
-async function getAllSubnets(network: "mainnet" | "fuji"): Promise<Subnet[]> {
+async function getAllSubnets(network: "mainnet" | "fuji"): Promise<SubnetInfo[]> {
   const now = Date.now();
   const cache = subnetsCached[network];
 
-  if (cache && (now - cache.timestamp) < CACHE_DURATION) {
+  if (cache && (now - cache.timestamp) < LIST_CACHE_DURATION) {
     return cache.data;
   }
 
@@ -141,17 +204,8 @@ async function getAllSubnets(network: "mainnet" | "fuji"): Promise<Subnet[]> {
 
   // Start new fetch
   const promise = (async () => {
-    const avalancheSDK = new Avalanche({ network });
-    const allSubnets: Subnet[] = [];
-    
-    const result = await avalancheSDK.data.primaryNetwork.listSubnets({
-      pageSize: PAGE_SIZE,
-      network,
-    });
-
-    for await (const page of result) {
-      allSubnets.push(...page.result.subnets);
-    }
+    // Subnet list (subnetId, isL1, blockchain names) from our P-chain read API.
+    const allSubnets = await fetchAllPages<SubnetInfo>(`/v1/networks/${network}/subnets`, "subnets");
 
     subnetsCached[network] = {
       data: allSubnets,
@@ -176,6 +230,19 @@ async function getAllSubnets(network: "mainnet" | "fuji"): Promise<Subnet[]> {
   return promise;
 }
 
+/* Fuji has ~8,000 subnets (80 pages, more than 120 s cold), and the stats
+   keep only the subnets with stake. So Fuji names only the subnets its
+   validators stand on, one read per subnet. A subnet whose read fails gets
+   the "Unknown" name, as an unlisted subnet does. */
+async function getStakedSubnets(network: "mainnet" | "fuji", validators: SimpleValidator[]): Promise<SubnetInfo[]> {
+  const subnets = await fetchSubnetsById(network, validators.map(v => v.subnetId));
+  return subnets.map(s => ({
+    subnetId: s.subnetId,
+    isL1: !!s.isL1,
+    blockchains: s.blockchains ? s.blockchains.map(b => ({ blockchainName: b.blockchainName ?? '' })) : null,
+  }));
+}
+
 async function getValidatorVersions(network: "mainnet" | "fuji"): Promise<Map<string, string>> {
   const now = Date.now();
   const cache = validatorVersionsCached[network];
@@ -185,42 +252,52 @@ async function getValidatorVersions(network: "mainnet" | "fuji"): Promise<Map<st
     return cache.data;
   }
 
-  const url = network === "mainnet" ? MAINNET_VALIDATOR_DISCOVERY_URL : FUJI_VALIDATOR_DISCOVERY_URL;
-  
+  const versionMap = new Map<string, string>();
+
+  // source: our own p_node_info snapshot, surfaced on the validators endpoint.
   try {
-    const response = await fetchWithTimeout(url);
-    
-    if (!response.ok) {
-      throw new Error(`Failed to fetch validator versions: ${response.status}`);
+    const res = await fetchWithTimeout(`${EXPLORER_API_BASE}/api/${network}/validators`);
+    if (res.ok) {
+      const j = await res.json();
+      for (const v of (Array.isArray(j?.validators) ? j.validators : [])) {
+        if (v?.nodeId && v.version) versionMap.set(v.nodeId, v.version);
+      }
     }
-
-    const data: ValidatorVersion[] = await response.json();
-    const versionMap = new Map<string, string>();
-
-    for (const validator of data) {
-      versionMap.set(validator.nodeId, validator.version || "Unknown");
-    }
-
-    // Update cache
-    validatorVersionsCached[network] = {
-      data: versionMap,
-      timestamp: now
-    };
-
-    return versionMap;
-  } catch (error: any) {
-    // Return cached data if available, even if stale
-    if (cache) {
-      return cache.data;
-    }
-    return new Map<string, string>();
+  } catch {
+    // discovery below still covers the set
   }
+
+  // discovery crawler reaches nodes we have not peered with, but reports
+  // whatever version it last connected to, which lags badly.
+  try {
+    const url = network === "mainnet" ? MAINNET_VALIDATOR_DISCOVERY_URL : FUJI_VALIDATOR_DISCOVERY_URL;
+    const response = await fetchWithTimeout(url);
+    if (response.ok) {
+      const data: ValidatorVersion[] = await response.json();
+      for (const validator of data) {
+        if (!validator.version) continue;
+        if (versionMap.has(validator.nodeId)) continue;
+        versionMap.set(validator.nodeId, validator.version);
+      }
+    }
+  } catch {
+    // both sources down, fall back to the last good map
+  }
+
+  // Nothing resolved: keep serving the previous map
+  if (versionMap.size === 0) {
+    return cache ? cache.data : new Map<string, string>();
+  }
+
+  validatorVersionsCached[network] = { data: versionMap, timestamp: now };
+  return versionMap;
 }
 
 async function getNetworkStatsInternal(network: "mainnet" | "fuji"): Promise<SubnetStats[]> {
+  const validatorsRead = getAllValidators(network);
   const [validators, subnets, versionMap] = await Promise.all([
-    getAllValidators(network),
-    getAllSubnets(network),
+    validatorsRead,
+    network === 'fuji' ? validatorsRead.then(v => getStakedSubnets(network, v)) : getAllSubnets(network),
     getValidatorVersions(network)
   ]);
 
@@ -238,7 +315,7 @@ async function getNetworkStatsInternal(network: "mainnet" | "fuji"): Promise<Sub
     subnetIsL1Map.set(subnet.subnetId, subnet.isL1);
     if (subnetAccumulators[subnet.subnetId]) continue;
     subnetAccumulators[subnet.subnetId] = {
-      name: subnet.blockchains.map(blockchain => blockchain.blockchainName).join('/'),
+      name: (subnet.blockchains ?? []).map(blockchain => blockchain.blockchainName).join('/') || `Subnet (${subnet.subnetId.slice(0, 8)}…)`,
       id: subnet.subnetId,
       byClientVersion: {},
       totalStake: 0n,
@@ -262,7 +339,7 @@ async function getNetworkStatsInternal(network: "mainnet" | "fuji"): Promise<Sub
     const stake = BigInt(validator.weight);
     subnetAccumulators[subnetId].totalStake += stake;
 
-    const version = versionMap.get(validator.nodeId)?.replace("avalanchego/", "") || "Unknown";
+    const version = minorVersionLine(versionMap.get(validator.nodeId)) || "Unknown";
 
     if (!subnetAccumulators[subnetId].byClientVersion[version]) {
       subnetAccumulators[subnetId].byClientVersion[version] = {
@@ -319,7 +396,7 @@ async function getNetworkStats(network: "mainnet" | "fuji"): Promise<SubnetStats
   const now = Date.now();
   const cache = statsCached[network];
   const cacheAge = cache ? now - cache.timestamp : Infinity;
-  const isCacheValid = cacheAge < CACHE_DURATION;
+  const isCacheValid = cacheAge < STATS_CACHE_DURATION;
   const isCacheStale = cache && !isCacheValid;
 
   if (isCacheStale && !revalidatingKeys.has(network)) {
@@ -348,7 +425,8 @@ async function getNetworkStats(network: "mainnet" | "fuji"): Promise<SubnetStats
   if (!pendingPromise) {
     pendingPromise = getNetworkStatsInternal(network);
     pendingStatsRequests.set(network, pendingPromise);
-    pendingPromise.finally(() => pendingStatsRequests.delete(network));
+    // the caller gets the error: this chain only frees the slot
+    pendingPromise.finally(() => pendingStatsRequests.delete(network)).catch(() => {});
   }
   
   const freshData = await pendingPromise; 
@@ -362,7 +440,8 @@ function createResponse(
   status = 200
 ) {
   const headers: Record<string, string> = { 
-    'Cache-Control': CACHE_CONTROL_HEADER, 
+    // an error answer is not kept: the next request asks again
+    'Cache-Control': status >= 400 ? 'no-store' : CACHE_CONTROL_HEADER, 
     'X-Data-Source': meta.source 
   };
   if (meta.network) headers['X-Network'] = meta.network;
@@ -392,7 +471,7 @@ export async function GET(request: Request) {
     const fetchTime = Date.now() - startTime;
 
     const source = fetchTime < 50 && cache ? 
-      (cacheAge && cacheAge < CACHE_DURATION ? 'cache' : 'stale-while-revalidate') : 
+      (cacheAge && cacheAge < STATS_CACHE_DURATION ? 'cache' : 'stale-while-revalidate') : 
       'fresh';
     
     console.log(`[GET /api/validator-stats] Network: ${network}, Source: ${source}, fetchTime: ${fetchTime}ms`);

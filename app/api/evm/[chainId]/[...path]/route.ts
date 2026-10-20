@@ -1,0 +1,86 @@
+import { NextRequest, NextResponse } from "next/server";
+import { EVM_API_BASE } from "@/lib/evm-explorer";
+import { toStatsChainId } from "@/lib/dedicated-stats";
+import { softStatus } from "@/lib/explorer-soft-status";
+
+// Server-side proxy to the EVM chain explorer API (plain HTTP on an IP). The
+// browser calls same-origin `/api/evm/{chainId}/{...}`; this handler fetches
+// `${EVM_API_BASE}/evm-api/{chainId}/{...}` server-side, sidestepping CORS and
+// the HTTPS→HTTP mixed-content block. Mirrors app/api/pchain/[network]/[...path].
+//
+// Keyed on chainId (not network) because /evm-api is chain-scoped: the layout
+// resolves (network, slug) → chainId from l1-chains.json and the client passes
+// the numeric id straight through.
+
+export const dynamic = "force-dynamic";
+
+const REQUEST_TIMEOUT_MS = 8000;
+// Live data (lists, stats, addresses)
+const CACHE_CONTROL = "public, max-age=3, s-maxage=3, stale-while-revalidate=10";
+const FAST_CACHE_CONTROL = "public, max-age=0, s-maxage=1";
+const FAST_CHAINS = new Set(["43114"]);
+// tx/{hash} and block/{id} are final at acceptance — once the upstream returns
+// a 200 the payload never changes, so cache hard and spare the origin box.
+const IMMUTABLE_CACHE_CONTROL =
+  "public, max-age=3600, s-maxage=86400, stale-while-revalidate=604800";
+
+function cacheControlFor(resource: string, chainId: string, query: URLSearchParams): string {
+  if (resource.startsWith("tx/") || resource.startsWith("block/")) {
+    return IMMUTABLE_CACHE_CONTROL;
+  }
+  // The newest transactions are polled every 5 s (a chain's home and its
+  // live list). With stale-while-revalidate each poll got the copy the poll
+  // before had asked for, 3 to 5 s old: one poll behind. A page of older
+  // ones (`before`) keeps the longer cache.
+  if (resource === "txs" && !query.has("before")) return FAST_CACHE_CONTROL;
+  return FAST_CHAINS.has(chainId) ? FAST_CACHE_CONTROL : CACHE_CONTROL;
+}
+
+async function fetchWithTimeout(url: string, timeoutMs = REQUEST_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    // cache: "no-store"
+    // we actually want CDN layer cached via the response headers
+    return await fetch(url, { cache: "no-store", signal: controller.signal, headers: { accept: "application/json" } });
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ chainId: string; path?: string[] }> },
+) {
+  const { chainId, path } = await params;
+
+  const upstreamChainId = toStatsChainId(chainId);
+
+  if (!/^\d+$/.test(upstreamChainId)) {
+    return NextResponse.json({ error: `invalid chainId '${chainId}'` }, { status: 400 });
+  }
+
+  const resource = (path ?? []).map(encodeURIComponent).join("/");
+  const search = req.nextUrl.search; // forward ?limit=, ?before=, ?q=, …
+  const upstream = `${EVM_API_BASE}/evm-api/${upstreamChainId}/${resource}${search}`;
+
+  try {
+    const res = await fetchWithTimeout(upstream);
+    const body = await res.text();
+    // Pass through status + body; attach cache headers only on success. A
+    // miss or an upstream error comes back soft to a read that asks.
+    return new NextResponse(
+      body,
+      softStatus(req, res.status, {
+        "content-type": res.headers.get("content-type") ?? "application/json",
+        ...(res.ok ? { "cache-control": cacheControlFor(resource, upstreamChainId, req.nextUrl.searchParams) } : {}),
+      }),
+    );
+  } catch (err) {
+    const aborted = err instanceof DOMException && err.name === "AbortError";
+    return NextResponse.json(
+      { error: aborted ? "explorer API timeout" : "explorer API unreachable" },
+      softStatus(req, 504),
+    );
+  }
+}

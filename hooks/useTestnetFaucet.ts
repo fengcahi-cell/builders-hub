@@ -5,7 +5,6 @@ import { useL1List, type L1ListItem } from '@/components/toolbox/stores/l1ListSt
 import useConsoleNotifications from './useConsoleNotifications';
 import { balanceService } from '@/components/toolbox/services/balanceService';
 import { useChainTokenTracker } from './useChainTokenTracker';
-import { useConsoleBadgeNotificationStore } from '@/stores/consoleBadgeNotificationStore';
 
 export interface FaucetClaimResult {
   success: boolean;
@@ -41,7 +40,11 @@ export const useTestnetFaucet = () => {
 
     try {
       const faucetRequest = async () => {
-        const response = await fetch(`/api/evm-chain-faucet?address=${walletEVMAddress}&chainId=${chainId}`);
+        const response = await fetch(`/api/evm-chain-faucet`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address: walletEVMAddress, chainId }),
+        });
         const rawText = await response.text();
         
         let data;
@@ -74,9 +77,6 @@ export const useTestnetFaucet = () => {
       }
 
       const result = await faucetPromise;
-      if (result.awardedBadges?.length > 0) {
-        useConsoleBadgeNotificationStore.getState().addBadges(result.awardedBadges);
-      }
 
       if (result.success) {
         if (walletEVMAddress) {
@@ -137,9 +137,6 @@ export const useTestnetFaucet = () => {
       }
 
       const result = await faucetPromise;
-      if (result.awardedBadges?.length > 0) {
-        useConsoleBadgeNotificationStore.getState().addBadges(result.awardedBadges);
-      }
       if (result.success) { setTimeout(() => { balanceService.updatePChainBalance() }, 2000) }
       return result;
     } finally {

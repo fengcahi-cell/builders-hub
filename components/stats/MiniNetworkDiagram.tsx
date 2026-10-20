@@ -11,6 +11,10 @@ import { useTheme } from 'next-themes';
  * Transparent background works on any page. Theme-aware text colors.
  */
 
+/* The image optimizer rejects SVG (dangerouslyAllowSVG is off), so chain
+   logos in that format load direct. Raster sources keep the optimizer. */
+const isSvgSource = (src: string) => /\.svg(?:[?#]|$)/i.test(src);
+
 export interface MiniChainData {
   id: string;
   chainId?: string; // blockchain chainId for ICM matching
@@ -38,6 +42,8 @@ interface MiniNetworkDiagramProps {
   autoRotateSpeed?: number;
   className?: string;
   onChainClick?: (chain: MiniChainData) => void;
+  /** Hide the nebula background and bottom CTA bar (marketing surfaces). */
+  minimal?: boolean;
 }
 
 interface ChainNode {
@@ -137,6 +143,7 @@ export default function MiniNetworkDiagram({
   autoRotateSpeed = 0.15,
   className = "",
   onChainClick,
+  minimal = false,
 }: MiniNetworkDiagramProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -163,6 +170,9 @@ export default function MiniNetworkDiagram({
     if (!url) return url;
     // Local images don't need proxying
     if (url.startsWith('/')) return url;
+    // The optimizer only ever 400s on SVG, which sent these through the
+    // onerror fallback to the same direct URL; go there first instead.
+    if (isSvgSource(url)) return url;
     // Use Next.js image optimization as a CORS proxy
     return `/_next/image?url=${encodeURIComponent(url)}&w=128&q=75`;
   }, []);
@@ -779,28 +789,43 @@ export default function MiniNetworkDiagram({
       className={`relative overflow-hidden ${className}`}
       style={{ width: containerSize, height: containerSize + BOTTOM_CONTROLS_HEIGHT }}
     >
-      {/* Background nebula gradient - contained within component */}
+      {/* Background nebula gradient - contained within component.
+          Two layers toggled via the `dark` class so SSR output is theme-independent
+          (reading resolvedTheme during render causes a hydration mismatch). */}
+      {!minimal && (
+      <>
       <div
-        className="absolute pointer-events-none overflow-hidden"
+        className="absolute pointer-events-none overflow-hidden dark:hidden"
         style={{
           width: '200%',
           height: '200%',
           left: '50%',
           top: '50%',
           transform: 'translate(-50%, -50%)',
-          background: isDarkMode
-            ? `
-              radial-gradient(ellipse 35% 30% at 45% 45%, rgba(139, 92, 246, 0.18) 0%, rgba(139, 92, 246, 0.06) 30%, transparent 50%),
-              radial-gradient(ellipse 30% 25% at 60% 55%, rgba(6, 182, 212, 0.15) 0%, rgba(6, 182, 212, 0.04) 30%, transparent 50%),
-              radial-gradient(ellipse 25% 35% at 48% 65%, rgba(236, 72, 153, 0.12) 0%, rgba(236, 72, 153, 0.03) 30%, transparent 50%)
-            `
-            : `
-              radial-gradient(ellipse 35% 30% at 45% 45%, rgba(139, 92, 246, 0.12) 0%, rgba(139, 92, 246, 0.04) 30%, transparent 50%),
-              radial-gradient(ellipse 30% 25% at 60% 55%, rgba(6, 182, 212, 0.10) 0%, rgba(6, 182, 212, 0.03) 30%, transparent 50%),
-              radial-gradient(ellipse 25% 35% at 48% 65%, rgba(236, 72, 153, 0.08) 0%, rgba(236, 72, 153, 0.02) 30%, transparent 50%)
-            `,
+          background: [
+            "radial-gradient(ellipse 35% 30% at 45% 45%, rgba(139, 92, 246, 0.12) 0%, rgba(139, 92, 246, 0.04) 30%, transparent 50%)",
+            "radial-gradient(ellipse 30% 25% at 60% 55%, rgba(6, 182, 212, 0.10) 0%, rgba(6, 182, 212, 0.03) 30%, transparent 50%)",
+            "radial-gradient(ellipse 25% 35% at 48% 65%, rgba(236, 72, 153, 0.08) 0%, rgba(236, 72, 153, 0.02) 30%, transparent 50%)",
+          ].join(", "),
         }}
       />
+      <div
+        className="absolute pointer-events-none overflow-hidden hidden dark:block"
+        style={{
+          width: '200%',
+          height: '200%',
+          left: '50%',
+          top: '50%',
+          transform: 'translate(-50%, -50%)',
+          background: [
+            "radial-gradient(ellipse 35% 30% at 45% 45%, rgba(139, 92, 246, 0.18) 0%, rgba(139, 92, 246, 0.06) 30%, transparent 50%)",
+            "radial-gradient(ellipse 30% 25% at 60% 55%, rgba(6, 182, 212, 0.15) 0%, rgba(6, 182, 212, 0.04) 30%, transparent 50%)",
+            "radial-gradient(ellipse 25% 35% at 48% 65%, rgba(236, 72, 153, 0.12) 0%, rgba(236, 72, 153, 0.03) 30%, transparent 50%)",
+          ].join(", "),
+        }}
+      />
+      </>
+      )}
       <canvas
         ref={canvasRef}
         width={dimensions.width * dpr}
@@ -830,9 +855,10 @@ export default function MiniNetworkDiagram({
       )}
       
       {/* Bottom bar with CTAs */}
+      {!minimal && (
       <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex items-center gap-2">
         <a
-          href="/stats/overview"
+          href="/explorer/mainnet"
           className="px-3 py-1.5 bg-zinc-900 dark:bg-white text-white dark:text-zinc-900 rounded-full text-[11px] font-medium hover:opacity-80 transition-opacity"
         >
           View Stats
@@ -844,6 +870,7 @@ export default function MiniNetworkDiagram({
           Explorer
         </a>
       </div>
+      )}
     </div>
   );
 }

@@ -15,11 +15,14 @@ import {
 import type { ValidatorP2P, AlertType, ReleaseClassification, L1ValidatorData } from '@/types/validator-alerts';
 import { getL1ChainName } from '@/server/services/l1-chain-metadata';
 import net from 'node:net';
+import { EXPLORER_API_BASE } from '@/lib/pchain-explorer';
 
-const P2P_API_URL = 'https://52.203.183.9.sslip.io/api/validators';
+const P2P_API_URL = `${EXPLORER_API_BASE}/api/mainnet/fleet/validators`;
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/ava-labs/avalanchego/releases';
 const DEFAULT_L1_FEE_MONTHLY_N_AVAX = Number(process.env.L1_VALIDATOR_FEE_MONTHLY_N_AVAX ?? '1330000000');
 const DEFAULT_L1_FEE_DAILY_N_AVAX = DEFAULT_L1_FEE_MONTHLY_N_AVAX / 30;
+
+const UPSTREAM_TIMEOUT_MS = 8000;
 
 /**
  * Cooldown periods in hours per alert type.
@@ -48,9 +51,22 @@ export const COOLDOWNS: Record<AlertType, number> = {
 // ---------------------------------------------------------------------------
 
 export async function fetchValidators(): Promise<ValidatorP2P[]> {
-  const res = await fetch(P2P_API_URL, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`P2P API returned ${res.status}`);
-  return res.json();
+  // Retry once: the P2P host has an intermittent multi-second cold-hit spike
+  // that clears on an immediate retry. Each attempt is capped by UPSTREAM_TIMEOUT_MS.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const res = await fetch(P2P_API_URL, {
+        cache: 'no-store',
+        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      });
+      if (!res.ok) throw new Error(`P2P API returned ${res.status}`);
+      return res.json();
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 interface GitHubRelease {
@@ -67,6 +83,7 @@ export async function fetchLatestRelease(): Promise<ReleaseClassification> {
   const res = await fetch(`${GITHUB_RELEASES_URL}?per_page=10`, {
     headers: { Accept: 'application/vnd.github.v3+json' },
     cache: 'no-store',
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
 
@@ -630,6 +647,7 @@ const CHAIN_VALIDATORS_BASE = process.env.NEXT_PUBLIC_SITE_URL || 'https://build
 export async function fetchL1Validators(subnetId: string): Promise<L1ValidatorData[]> {
   const res = await fetch(`${CHAIN_VALIDATORS_BASE}/api/chain-validators/${subnetId}`, {
     cache: 'no-store',
+    signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`chain-validators API returned ${res.status} for ${subnetId}`);
   const data = await res.json();

@@ -1,4 +1,7 @@
 import { redirect } from 'next/navigation';
+import { consoleToolMetadata } from "@/components/console/tool-metadata";
+
+export const metadata = consoleToolMetadata("/console/ictt", "ICTT Setup");
 
 type SearchParams = { phase?: string; remote?: string };
 

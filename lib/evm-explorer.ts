@@ -1,0 +1,229 @@
+// EVM chain explorer config + types + client helpers.
+//
+// The EVM explorer API is served by our stats API. It is reached server-side via the proxy route
+// (app/api/evm/[chainId]/[...path]/route.ts), which sidesteps CORS and keeps the
+// upstream host out of the browser. Client code fetches the same-origin
+// `/api/evm/{chainId}/...` paths via `evmApiPath()`.
+//
+// URL scheme (shared with P-chain, chain-family agnostic):
+//   /explorer/{network}/{chain}/{resource}
+//   network  = mainnet | fuji
+//   chain    = an L1/C-Chain slug (resolved to a numeric chainId by the layout)
+//   resource = "" (home) | blocks | block/{id} | txs | tx/{hash}
+//              | address/{addr} | address/{addr}/txs | address/{addr}/transfers
+
+import type { Abi } from "viem";
+import { precompileAt } from "@/lib/precompiles";
+import type { TxFeeFacts } from "@/lib/evm-fee";
+
+export const EVM_API_BASE =
+  process.env.EXPLORER_API_URL || "https://stats-api.avax.network";
+
+// --- client fetch helper (same-origin proxy) ------------------------------
+
+/** Builds the same-origin proxy path for an EVM explorer API call. */
+export function evmApiPath(
+  chainId: number | string,
+  resource: string,
+  query?: Record<string, string | number | undefined>,
+): string {
+  const qs = query
+    ? Object.entries(query)
+        .filter(([, v]) => v !== undefined && v !== "")
+        .map(([k, v]) => `${k}=${encodeURIComponent(String(v))}`)
+        .join("&")
+    : "";
+  const base = `/api/evm/${chainId}/${resource.replace(/^\//, "")}`;
+  return qs ? `${base}?${qs}` : base;
+}
+
+/* Unambiguous EVM query shapes route with no API round-trip: block heights are
+   digits, addresses are 0x + 40 hex, tx hashes are 0x + 64 hex. */
+export function classifyEvmLocally(
+  q: string,
+): { type: "block" | "address" | "tx"; id: string } | null {
+  const s = q.trim();
+  if (/^\d+$/.test(s)) return { type: "block", id: s };
+  if (/^0x[0-9a-fA-F]{40}$/.test(s)) return { type: "address", id: s.toLowerCase() };
+  if (/^0x[0-9a-fA-F]{64}$/.test(s)) return { type: "tx", id: s.toLowerCase() };
+  return null;
+}
+
+/* every Avalanche EVM block (both coreth and subnet-evm, unless a chain turns on
+  `allowFeeRecipients`) carries the hardcoded blackhole coinbase, so the block's
+  "Fee Recipient" looks like a validator payout when in fact the fees are burned
+  and nobody is paid. */
+const WELL_KNOWN_ADDRESSES: Record<string, { label: string; note: string }> = {
+  "0x0100000000000000000000000000000000000000": {
+    label: "Burn Address",
+    note: "The blackhole coinbase every Avalanche EVM block names. Fees sent here are burned: no key controls this address, so nothing is paid out.",
+  },
+  "0x0000000000000000000000000000000000000000": {
+    label: "Null Address",
+    note: "The zero address: the counterparty for token mints and burns, and an unrecoverable sink for anything sent to it.",
+  },
+};
+
+/* code the C-Chain genesis itself allocates (mainnet and Fuji), verified
+   against avalanchego genesis/genesis_{mainnet,fuji}.json on 2026-09-24:
+   the blackhole address carries a 305-byte Solidity library (solc 0.6.10)
+   from launch. No transaction deployed it, so there is no creator and no
+   source to verify. */
+const GENESIS_CODE: Record<string, Set<string>> = {
+  "43114": new Set(["0x0100000000000000000000000000000000000000"]),
+  "43113": new Set(["0x0100000000000000000000000000000000000000"]),
+};
+
+/** true when the chain's genesis, not a transaction, put this code here */
+export function isGenesisCode(chainId: string | number, addr?: string): boolean {
+  return !!addr && !!GENESIS_CODE[String(chainId)]?.has(addr.toLowerCase());
+}
+
+export interface KnownAddress {
+  label: string;
+  note: string;
+  /** set for a precompile: the ABI its calls and logs decode against */
+  abi?: Abi;
+}
+
+/** name for a protocol-fixture address. A precompile is named only on a
+ *  chain that carries it, so it needs the chain. */
+export function knownAddress(addr?: string | null, chainId?: string | number | null): KnownAddress | undefined {
+  if (!addr) return undefined;
+  return WELL_KNOWN_ADDRESSES[addr.toLowerCase()] ?? precompileAt(chainId, addr);
+}
+
+// --- response types (mirror stats-api/evmexplorer/handlers.go) ------------
+
+export interface StatsResponse {
+  tipHeight: number;
+  tipTimestamp: number; // unix seconds
+  txCount24h: number;
+  gasPriceWei: string;
+}
+
+export interface TxSummary {
+  hash: string;
+  blockNumber: number;
+  txIndex: number;
+  from: string;
+  to: string; // "" for contract-creation
+  value: string; // wei, decimal string
+  gasUsed: number;
+  success: boolean;
+  timestamp: number; // unix seconds
+  /** 4-byte calldata selector; absent/"" for plain value transfers */
+  methodId?: string;
+  /** wei actually paid (gasUsed × effectiveGasPrice); set only by the
+   *  RPC-sourced block reader, the indexer does not carry it */
+  feeWei?: string;
+}
+
+export interface TxListResponse {
+  transactions: TxSummary[];
+  nextBefore?: number; // block number cursor for "load more"
+}
+
+export interface BlockSummary {
+  number: number;
+  hash: string;
+  txCount: number;
+  gasUsed: number;
+  gasLimit: number;
+  miner: string;
+  timestamp: number;
+}
+
+export interface BlockListResponse {
+  blocks: BlockSummary[];
+  nextBefore?: number;
+}
+
+export interface BlockDetail {
+  number: number;
+  hash: string;
+  parentHash: string;
+  timestamp: number;
+  miner: string;
+  gasUsed: number;
+  gasLimit: number;
+  baseFeePerGas: string;
+  txCount: number;
+  transactions: TxSummary[];
+}
+
+export interface EventLog {
+  logIndex: number;
+  address: string;
+  topics: string[];
+  data: string;
+}
+
+export interface InternalTx {
+  from: string;
+  to: string;
+  value: string;
+  callType: string;
+  gasUsed: number;
+}
+
+export interface TxDetail {
+  hash: string;
+  blockNumber: number;
+  blockHash: string;
+  timestamp: number;
+  txIndex: number;
+  from: string;
+  to: string;
+  value: string;
+  nonce: number;
+  gasLimit: number;
+  gasUsed: number;
+  gasPrice: string;
+  success: boolean;
+  type: number;
+  input: string;
+  contractAddress?: string;
+  logs: EventLog[];
+  internalTxns: InternalTx[];
+  /** the bid, the price paid and the block's base fee range: only the RPC copy has them */
+  fees?: TxFeeFacts;
+}
+
+export type TransferStandard = "ERC20" | "ERC721" | "ERC1155";
+
+export interface Transfer {
+  standard: TransferStandard | string;
+  token: string; // contract address
+  from: string;
+  to: string;
+  amount: string; // ERC20/1155 value
+  tokenId: string; // ERC721/1155 token id
+  txHash: string;
+  blockNumber: number;
+  timestamp: number;
+}
+
+export interface TransferListResponse {
+  transfers: Transfer[];
+  nextBefore?: number;
+}
+
+export interface AddressSummary {
+  address: string;
+  txCount: number;
+  firstSeen?: number;
+  lastSeen?: number;
+}
+
+export interface SearchResult {
+  type: "block" | "tx" | "address" | "none";
+  id: string;
+}
+
+export interface ChainEntry {
+  chainId: number;
+  chainName: string;
+  network: string;
+  txCount: number;
+}

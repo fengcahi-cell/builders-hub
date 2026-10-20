@@ -14,6 +14,8 @@ import {
   Requirement,
   UserBadge,
 } from "@/types/badge";
+import { MemberStatus } from "@/types/project";
+import { NOT_CONSOLE_BADGE } from "./rewardBoard";
 
 export async function assignBadgeProject(
   body: AssignBadgeBody,
@@ -46,14 +48,14 @@ export async function assignBadgeProject(
       id: body.projectId,
       members: {
         some: {
-          status: "Confirmed",
+          status: MemberStatus.CONFIRMED,
         },
       },
     },
     include: {
       members: {
         where: {
-          status: "Confirmed",
+          status: MemberStatus.CONFIRMED,
           user_id: {
             not: null,
           },
@@ -405,7 +407,7 @@ export async function getUserBadgesByProjectId(
       id: projectId,
       members: {
         some: {
-          status: "Confirmed",
+          status: MemberStatus.CONFIRMED,
         },
       },
     },
@@ -421,6 +423,7 @@ export async function getUserBadgesByProjectId(
           .map((member) => member.user_id)
           .filter((id): id is string => id !== null && id !== undefined),
       },
+      badge: NOT_CONSOLE_BADGE,
     },
     include: {
       badge: true,

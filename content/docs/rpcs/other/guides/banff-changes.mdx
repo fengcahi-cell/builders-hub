@@ -2,10 +2,10 @@
 title: Banff Changes
 description: This document specifies the changes in Avalanche “Banff”, which was released in AvalancheGo v1.9.x.
 ---
-Block Changes[​](#block-changes "Direct link to heading")
+Block Changes
 ---------------------------------------------------------
 
-### Apricot[​](#apricot "Direct link to heading")
+### Apricot
 
 Apricot allows the following block types with the following content:
 
@@ -27,7 +27,7 @@ Each block has a header containing:
 - ParentID
 - Height
 
-### Banff[​](#banff "Direct link to heading")
+### Banff
 
 Banff allows the following block types with the following content:
 
@@ -62,9 +62,9 @@ So the two main differences with respect to Apricot are:
 - New Transaction types: _RemoveSubnetValidatorTx_, _TransformSubnetTx_, _AddPermissionlessValidatorTx_, and _AddPermissionlessDelegatorTx_ have been added into Standard Blocks.
 - Block timestamp is explicitly serialized into block header, to allow chain time update.
 
-### New Transactions[​](#new-transactions "Direct link to heading")
+### New Transactions
 
-#### RemoveSubnetValidatorTx[​](#removesubnetvalidatortx "Direct link to heading")
+#### RemoveSubnetValidatorTx
 
 ```
 type RemoveSubnetValidatorTx struct {
@@ -72,13 +72,13 @@ type RemoveSubnetValidatorTx struct {
 	// The node to remove from the Avalanche L1.
 	NodeID ids.NodeID `serialize:"true" json:"nodeID"`
 	// The Avalanche L1 to remove the node from.
-	Subnet ids.ID `serialize:"true" json:"subnet"`
+	Subnet ids.ID `serialize:"true" json:"subnetID"`
 	// Proves that the issuer has the right to remove the node from the Avalanche L1.
 SubnetAuth verify.Verifiable `serialize:"true" json:"subnetAuthorization"`
 }
 ```
 
-#### TransformSubnetTx[​](#transformsubnettx "Direct link to heading")
+#### TransformSubnetTx
 
 ```
 type TransformSubnetTx struct {
@@ -157,7 +157,7 @@ SubnetAuth verify.Verifiable `serialize:"true" json:"subnetAuthorization"`
 }
 ```
 
-#### AddPermissionlessValidatorTx[​](#addpermissionlessvalidatortx "Direct link to heading")
+#### AddPermissionlessValidatorTx
 
 ```
 type AddPermissionlessValidatorTx struct {
@@ -166,7 +166,10 @@ type AddPermissionlessValidatorTx struct {
 	// Describes the validator
 	Validator validator.Validator `serialize:"true" json:"validator"`
 	// ID of the Avalanche L1 this validator is validating
-	Subnet ids.ID `serialize:"true" json:"subnet"`
+	Subnet ids.ID `serialize:"true" json:"subnetID"`
+	// If [Subnet] is the Primary Network, [Signer] is the BLS key of this
+	// validator. Otherwise, it is the empty signer.
+	Signer signer.Signer `serialize:"true" json:"signer"`
 	// Where to send staked tokens when done validating
 	StakeOuts []*avax.TransferableOutput `serialize:"true" json:"stake"`
 	// Where to send validation rewards when done validating
@@ -180,7 +183,7 @@ type AddPermissionlessValidatorTx struct {
 }
 ```
 
-#### AddPermissionlessDelegatorTx[​](#addpermissionlessdelegatortx "Direct link to heading")
+#### AddPermissionlessDelegatorTx
 
 ```
 type AddPermissionlessDelegatorTx struct {
@@ -189,15 +192,15 @@ type AddPermissionlessDelegatorTx struct {
 	// Describes the validator
 	Validator validator.Validator `serialize:"true" json:"validator"`
 	// ID of the Avalanche L1 this validator is validating
-	Subnet ids.ID `serialize:"true" json:"subnet"`
+	Subnet ids.ID `serialize:"true" json:"subnetID"`
 	// Where to send staked tokens when done validating
-	Stake []*avax.TransferableOutput `serialize:"true" json:"stake"`
+	StakeOuts []*avax.TransferableOutput `serialize:"true" json:"stake"`
 	// Where to send staking rewards when done validating
-	RewardsOwner fx.Owner `serialize:"true" json:"rewardsOwner"`
+	DelegationRewardsOwner fx.Owner `serialize:"true" json:"rewardsOwner"`
 }
 ```
 
-#### New TypeIDs[​](#new-typeids "Direct link to heading")
+#### New TypeIDs
 
 ```
 ApricotProposalBlock = 0

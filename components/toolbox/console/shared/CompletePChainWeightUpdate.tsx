@@ -7,12 +7,8 @@ import { Alert } from '@/components/toolbox/components/Alert';
 import { hexToBytes, bytesToHex, encodeFunctionData, Abi } from 'viem';
 import NativeTokenStakingManager from '@/contracts/icm-contracts/compiled/NativeTokenStakingManager.json';
 import ValidatorManagerABI from '@/contracts/icm-contracts/compiled/ValidatorManager.json';
-import {
-  getRegistrationJustification,
-  newL1ValidatorWeightMessage,
-  newWarpMessage,
-  packWarpIntoAccessList,
-} from '@avalanche-sdk/interchain/warp';
+import { newL1ValidatorWeightMessage, newWarpMessage, packWarpIntoAccessList } from '@avalanche-sdk/interchain/warp';
+import { findRegistrationJustification } from '@/components/toolbox/utils/registrationJustification';
 import { hexToCB58 } from '@avalanche-sdk/client/utils';
 import { useAvalancheSDKChainkit } from '@/components/toolbox/stores/useAvalancheSDKChainkit';
 import useConsoleNotifications from '@/hooks/useConsoleNotifications';
@@ -28,6 +24,14 @@ import { useViemChainStore } from '@/components/toolbox/stores/toolboxStore';
 import { DynamicCodeBlock } from 'fumadocs-ui/components/dynamic-codeblock';
 import { Check } from 'lucide-react';
 import { generateCastSendCommand } from '@/components/toolbox/utils/castCommand';
+import { ProposerVMPreflightCard } from '@/components/toolbox/console/shared/ProposerVMPreflightCard';
+import {
+  AggregationRemediation,
+  parseAggregationError,
+  type RemediationLink,
+} from '@/components/toolbox/hooks/contracts/parseAggregationError';
+import { SigningSubnetStatus, signingSubnetWaitText } from './SigningSubnetStatus';
+import { NO_L1_SELECTED } from '@/components/toolbox/utils/vmcLookupText';
 
 export type WeightUpdateType = 'ChangeWeight' | 'Delegation';
 export type OwnerType = 'PoAManager' | 'StakingManager' | 'EOA' | null;
@@ -37,6 +41,10 @@ export interface CompletePChainWeightUpdateProps {
   subnetIdL1: string;
   pChainTxId?: string;
   signingSubnetId?: string;
+  /** useVMCAddress is loading the signing subnet */
+  signingSubnetLoading: boolean;
+  /** The useVMCAddress lookup error */
+  signingSubnetError: string | null;
   onSuccess: (data: { txHash: string; message: string }) => void;
   onError: (message: string) => void;
 
@@ -67,6 +75,8 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
   subnetIdL1,
   pChainTxId,
   signingSubnetId,
+  signingSubnetLoading,
+  signingSubnetError,
   onSuccess,
   onError,
   updateType,
@@ -89,6 +99,7 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
   const [delegationIDState, setDelegationIDState] = useState(delegationID || '');
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setErrorState] = useState<string | null>(null);
+  const [aggRemediation, setAggRemediation] = useState<RemediationLink[] | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [updateComplete, setUpdateComplete] = useState(false);
   const [pChainSignature, setPChainSignature] = useState<string | null>(null);
@@ -134,8 +145,8 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
       return false;
     }
     if (!subnetIdL1) {
-      setErrorState('L1 Subnet ID is required.');
-      onError('L1 Subnet ID is required.');
+      setErrorState(NO_L1_SELECTED);
+      onError(NO_L1_SELECTED);
       return false;
     }
     if (!managerAddress) {
@@ -146,6 +157,12 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
     if (!chainPublicClient) {
       setErrorState('Wallet or chain configuration is not properly initialized.');
       onError('Wallet or chain configuration is not properly initialized.');
+      return false;
+    }
+    const signingSubnetWait = signingSubnetWaitText(signingSubnetId, signingSubnetLoading, signingSubnetError);
+    if (signingSubnetWait) {
+      setErrorState(signingSubnetWait);
+      onError(signingSubnetWait);
       return false;
     }
 
@@ -213,7 +230,7 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
       // Step 3: Get justification (only for ChangeWeight, delegation doesn't need it)
       let justification: Uint8Array | undefined;
       if (isChangeWeight) {
-        const fetchedJustification = await getRegistrationJustification(
+        const fetchedJustification = await findRegistrationJustification(
           weightMessageData.validationIdHex,
           subnetIdL1,
           chainPublicClient!,
@@ -229,7 +246,7 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
       const aggregateSignaturePromise = aggregateSignature({
         message: bytesToHex(l1ValidatorWeightMessage),
         ...(justification && { justification: bytesToHex(justification) }),
-        signingSubnetId: signingSubnetId || subnetIdL1,
+        signingSubnetId,
       });
 
       notify(
@@ -291,8 +308,11 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
       const message = err instanceof Error ? err.message : String(err);
 
       const errorPrefix = isDelegation ? 'Failed to complete delegation' : 'Failed to complete weight change';
-      setErrorState(`${errorPrefix}: ${message}`);
-      onError(`${errorPrefix}: ${message}`);
+      const mapped = parseAggregationError(err);
+      setAggRemediation(mapped?.remediation ?? null);
+      const display = mapped?.message ?? `${errorPrefix}: ${message}`;
+      setErrorState(display);
+      onError(display);
     } finally {
       setIsProcessing(false);
     }
@@ -326,13 +346,15 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
   }
 
   if (!subnetIdL1) {
-    return <div className="text-sm text-zinc-500 dark:text-zinc-400">Please select an L1 subnet first.</div>;
+    return <div className="text-sm text-zinc-500 dark:text-zinc-400">{NO_L1_SELECTED}</div>;
   }
 
+  // A pending or completed tx is covered by isProcessing and updateComplete. A reverted tx
+  // leaves the button enabled, so the user can try again.
   const isButtonDisabled =
     isProcessing ||
-    !!txHash ||
     !pChainTxIdState.trim() ||
+    !signingSubnetId ||
     (isDelegation && !delegationIDState.trim()) ||
     isLoadingOwnership ||
     (isChangeWeight && isContractOwner === false && !useMultisig) ||
@@ -343,7 +365,15 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
 
   return (
     <div className="space-y-3">
-      {error && <Alert variant="error">{error}</Alert>}
+      <ProposerVMPreflightCard requiredTxId={pChainTxIdState.trim() || null} />
+      {error && (
+        <Alert variant="error">
+          <div>
+            {error}
+            {aggRemediation && <AggregationRemediation items={aggRemediation} />}
+          </div>
+        </Alert>
+      )}
 
       {/* Step 1: Enter P-Chain Transaction */}
       <div
@@ -461,21 +491,29 @@ const CompletePChainWeightUpdate: React.FC<CompletePChainWeightUpdateProps> = ({
               <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">Checking contract ownership...</p>
             )}
 
+            {step1Complete && !step2Complete && (
+              <SigningSubnetStatus
+                signingSubnetId={signingSubnetId}
+                isLoading={signingSubnetLoading}
+                error={signingSubnetError}
+                className="mt-2"
+              />
+            )}
+
             {step1Complete && !step2Complete && !(!isCoreWallet && pChainSignature) && (
               <div className="mt-2">
                 <Button
                   onClick={handleCompleteWeightUpdate}
                   disabled={isButtonDisabled}
                   loading={isProcessing}
+                  loadingText="Processing..."
                   className="w-full"
                 >
                   {isLoadingOwnership
                     ? 'Checking ownership...'
-                    : isProcessing
-                      ? 'Processing...'
-                      : isCoreWallet
-                        ? `Complete ${isDelegation ? 'Delegation' : 'Weight Change'}`
-                        : 'Aggregate Signatures'}
+                    : isCoreWallet
+                      ? `Complete ${isDelegation ? 'Delegation' : 'Weight Change'}`
+                      : 'Aggregate Signatures'}
                 </Button>
               </div>
             )}

@@ -5,8 +5,9 @@ const C_CHAIN_FUJI = 43113;
 const C_CHAIN_MAINNET = 43114;
 
 function getCChainTxUrl(chainId: number, txHash: string): string | null {
+  // Fuji C-Chain isn't fully served by our explorer yet — keep it on Snowtrace.
   if (chainId === C_CHAIN_FUJI) return `https://testnet.snowtrace.io/tx/${txHash}`;
-  if (chainId === C_CHAIN_MAINNET) return `https://snowtrace.io/tx/${txHash}`;
+  if (chainId === C_CHAIN_MAINNET) return `/explorer/mainnet/c-chain/tx/${txHash}`;
   return null;
 }
 
@@ -21,7 +22,7 @@ export function EERCTxLink({
   chainId,
   txHash,
   children,
-  className = 'underline text-emerald-600 dark:text-emerald-400',
+  className = 'font-mono text-zinc-900 underline decoration-zinc-300 underline-offset-4 transition-colors hover:decoration-[#E6212F] dark:text-zinc-50 dark:decoration-zinc-600 dark:hover:decoration-[#E6212F]',
 }: EERCTxLinkProps) {
   const url = getCChainTxUrl(chainId, txHash);
 

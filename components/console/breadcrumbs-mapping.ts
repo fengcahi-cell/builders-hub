@@ -1,6 +1,9 @@
-export const pathToBreadcrumb = {
+const routes: Record<string, string[]> = {
   // Console root
   "/console": ["Console"],
+
+  // Studio
+  "/console/studio": ["Console", "Studio"],
 
   // Primary Network
   "/console/primary-network/node-setup": ["Console", "Primary Network", "Node Setup"],
@@ -11,8 +14,10 @@ export const pathToBreadcrumb = {
 
   // Layer 1
   "/console/layer-1/create": ["Console", "Layer 1", "Create New L1"],
+  "/console/layer-1/upgrade": ["Console", "Layer 1", "Upgrade JSON"],
   "/console/layer-1/l1-node-setup": ["Console", "Layer 1", "L1 Node Setup"],
   "/console/layer-1/explorer-setup": ["Console", "Layer 1", "Explorer Setup"],
+  "/console/layer-1/advance-pchain-view": ["Console", "Layer 1", "Advance P-Chain View"],
 
   // L1 Tokenomics
   "/console/l1-tokenomics/fee-manager": ["Console", "L1 Tokenomics", "Transaction Fee Parameters"],
@@ -44,3 +49,15 @@ export const pathToBreadcrumb = {
   "/console/utilities/vmcMigrateFromV1": ["Console", "Utilities", "Migrate VMC From V1 to V2"],
   "/console/utilities/data-api-keys": ["Console", "Utilities", "Data API Keys"],
 };
+
+// A Studio project page has the project id as its last segment; without this entry the trail title-cases the id.
+const STUDIO_PROJECT = /^\/console\/studio\/[^/]+$/;
+const STUDIO_PROJECT_CRUMBS = ["Console", "Studio", "Project"];
+
+/** The page trails, by pathname. Each Studio project page (/console/studio/<id>) reads "Project". */
+export const pathToBreadcrumb: Record<string, string[]> = new Proxy(routes, {
+  get: (target, key) =>
+    typeof key === "string" && !Object.hasOwn(target, key) && STUDIO_PROJECT.test(key)
+      ? STUDIO_PROJECT_CRUMBS
+      : Reflect.get(target, key),
+});
