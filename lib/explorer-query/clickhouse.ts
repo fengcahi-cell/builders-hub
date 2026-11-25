@@ -4,7 +4,7 @@
    reference tables our server builds (sources.ts) add their own lines. */
 
 import { withQuerySlot } from "@/lib/clickhouse/client";
-import { MAX_ROWS } from "./guard";
+import { MAX_ROWS, quotedName } from "./guard";
 import { headTime } from "./head";
 import { networkChains, refSchema, withSources, type NetworkChain } from "./sources";
 import { NETWORK_ID, targetOf } from "./target";
@@ -113,7 +113,7 @@ interface RawJson {
 
 /* Two ways in. ClickHouse now sits inside the stats-api cluster with no
    public port, so the usual path is stats-api's own query endpoint
-   (/v2/query, a key per holder). A direct URL (QUERY_CLICKHOUSE_URL, the
+   (/v2/query, behind a Cloudflare WAF token rule). A direct URL (QUERY_CLICKHOUSE_URL, the
    local test harness) still wins when it is set. */
 const STATS_QUERY_URL = process.env.STATS_QUERY_URL || "https://stats-api.avax.network/v2/query";
 
@@ -307,7 +307,7 @@ export async function runQuery(sql: string, chainId?: number): Promise<QueryResu
   if (bytes.length || stale.length) {
     const cols = body.meta
       .map((c) => {
-        const q = "`" + c.name.replace(/`/g, "") + "`";
+        const q = quotedName(c.name);
         const s = stale.find((x) => x.column === c);
         return bytes.includes(c.name) ? `lower(concat('0x', hex(${q}))) AS ${q}` : s ? `${s.sql(q)} AS ${q}` : q;
       })
@@ -343,31 +343,39 @@ export async function runQuery(sql: string, chainId?: number): Promise<QueryResu
 /* ------------------------------------------------------------------ */
 /* the schema card                                                     */
 
-const schemaCache = new Map<string, { at: number; text: string }>();
+export interface TableSchema {
+  name: string;
+  columns: ColumnMeta[];
+}
+
+const schemaCache = new Map<string, { at: number; tables: TableSchema[] }>();
 const SCHEMA_TTL_MS = 60 * 60_000;
 
-/** the tables as the database describes them, one line per table, then
-    the reference tables this network has (sources.ts) */
-export async function schemaCard(chainId: number): Promise<string> {
+/** this target's chain tables as the database describes them, each with its typed columns, kept an hour */
+export async function schemaTables(chainId: number): Promise<TableSchema[]> {
   const { kind, tables } = targetOf(chainId);
-  const refs = refSchema(chainId);
   const hit = schemaCache.get(kind);
-  if (hit && Date.now() - hit.at < SCHEMA_TTL_MS) return [hit.text, ...refs].join("\n");
+  if (hit && Date.now() - hit.at < SCHEMA_TTL_MS) return hit.tables;
   const list = tables.map((t) => `'${t}'`).join(", ");
   const r = await runQuery(
     `SELECT table, name, type FROM system.columns WHERE database = currentDatabase() AND table IN (${list}) ORDER BY table, position`,
   );
-  const by = new Map<string, string[]>();
+  const by = new Map<string, ColumnMeta[]>();
   for (const row of r.rows) {
     const t = String(row.table);
-    (by.get(t) ?? by.set(t, []).get(t)!).push(`${row.name} ${row.type}`);
+    (by.get(t) ?? by.set(t, []).get(t)!).push({ name: String(row.name), type: String(row.type) });
   }
-  const text = tables.filter((t) => by.has(t))
-    .map((t) => `${t}(${by.get(t)!.join(", ")})`)
-    .join("\n");
-  if (!text) throw new Error("schema card empty");
-  schemaCache.set(kind, { at: Date.now(), text });
-  return [text, ...refs].join("\n");
+  const found = tables.filter((t) => by.has(t)).map((t) => ({ name: t, columns: by.get(t)! }));
+  if (!found.length) throw new Error("schema card empty");
+  schemaCache.set(kind, { at: Date.now(), tables: found });
+  return found;
+}
+
+/** the tables as the database describes them, one line per table, then
+    the reference tables this network has (sources.ts) */
+export async function schemaCard(chainId: number): Promise<string> {
+  const tables = await schemaTables(chainId);
+  return [...tables.map((t) => `${t.name}(${t.columns.map((c) => `${c.name} ${c.type}`).join(", ")})`), ...refSchema(chainId)].join("\n");
 }
 
 export interface Coverage {

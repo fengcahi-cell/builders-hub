@@ -5,12 +5,56 @@ import { GetProjectByHackathonAndUser } from '@/server/services/projects';
 import { createProject, ProjectCreateResult } from '@/server/services/submitProject';
 import { NextResponse } from 'next/server';
 import { MINI_GRANT_HACKATHON_ID } from '@/lib/grants/programs';
+import { z } from 'zod';
+import { readJsonBody } from '@/lib/api/json-body';
 
 interface RegistrationData {
   terms_event_conditions: boolean;
   city?: string;
   telegram_account?: string;
 }
+
+/** A field the body may leave out or send as null. Both read as absent, and createProject sets the default. */
+const absentOr = <T extends z.ZodType>(schema: T) => schema.nullish().transform((value) => value ?? undefined);
+/** The same, for a field that createProject already reads as empty when its shape is wrong. */
+const lenient = <T extends z.ZodType>(schema: T) => schema.nullish().catch(undefined).transform((value) => value ?? undefined);
+const text = absentOr(z.string());
+const textList = absentOr(z.array(z.string()));
+
+// The fields createProject writes, each with the type of its column. Other keys the forms send (file inputs, flags)
+// pass through and are not written.
+const createProjectBodySchema = z.looseObject({
+  id: text,
+  hackaton_id: text,
+  isDraft: absentOr(z.boolean()),
+  project_name: text,
+  short_description: text,
+  full_description: text,
+  tech_stack: text,
+  github_repository: text,
+  demo_link: text,
+  demo_video_link: text,
+  explanation: text,
+  logo_url: text,
+  cover_url: text,
+  other_category: text,
+  is_preexisting_idea: absentOr(z.boolean()),
+  screenshots: textList,
+  tracks: textList,
+  tech_stack_tags: lenient(z.array(z.string())),
+  // one form sends a list and another a comma-separated text: both become the list
+  categories: lenient(z.union([z.array(z.string()), z.string().transform((value) => value.split(',').filter(Boolean))])),
+  website: lenient(z.record(z.string(), z.string())),
+  socials: lenient(z.record(z.string(), z.string())),
+  consent_sharing: lenient(z.boolean()),
+  registrationData: z
+    .object({
+      terms_event_conditions: z.boolean(),
+      city: z.string().optional(),
+      telegram_account: z.string().optional(),
+    })
+    .optional(),
+});
 
 async function autoRegisterIfNeeded(
   session: Session,
@@ -81,7 +125,10 @@ async function autoRegisterIfNeeded(
 
 export const POST = withAuth(async (request, _context: unknown, session: Session) => {
   try{
-    const body = await request.json();
+    const body = await readJsonBody(request, createProjectBodySchema);
+    if (!body) {
+      return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
+    }
 
     // Auto-register the submitter if they haven't registered for the hackathon yet.
     // registrationData carries the terms acceptance and any fields collected in the modal.
@@ -102,7 +149,11 @@ export const POST = withAuth(async (request, _context: unknown, session: Session
       }
     }
 
-    const newProject: ProjectCreateResult = await createProject({ ...body, submittedBy: session.user.email, user_id: resolvedUserId });
+    const newProject: ProjectCreateResult = await createProject({
+      ...body,
+      submittedBy: session.user.email,
+      user_id: resolvedUserId,
+    });
 
     return NextResponse.json(
       { message: 'project created', project: newProject },

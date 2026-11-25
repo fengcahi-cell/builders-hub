@@ -96,8 +96,8 @@ export function SearchBox({
   // the P-Chain's tables cover mainnet and Fuji; the network's Query page is mainnet only
   const askable = (ask && (network === "mainnet" || network === "fuji")) || (!!askAt && network === "mainnet");
   const queryPage = askAt ?? `${base}/query`;
-  // the network box asks about any chain: both indexes' recents and starters
-  const starters = (askAt ? [...EXAMPLES.slice(0, 1), ...PCHAIN_EXAMPLES.slice(0, 1)] : PCHAIN_EXAMPLES).flatMap((g) => g.items.map((i) => i.q));
+  // the network box asks about any chain: both indexes' recents and starters. A group's first two lead it
+  const starters = (askAt ? [...EXAMPLES.slice(0, 1), ...PCHAIN_EXAMPLES.slice(0, 1)] : PCHAIN_EXAMPLES).flatMap((g) => g.items.slice(0, 2).map((i) => i.q));
   const [recentAsked, setRecentAsked] = useState<string[]>([]);
 
   useEffect(() => {
@@ -205,7 +205,8 @@ export function SearchBox({
     if (local?.type === "address") {
       setBusy(true);
       try {
-        const [h] = await bech32AddressCached(network, local.id);
+        // hits is never empty: the P-Chain stands in when no chain is known to hold it
+        const [h] = (await bech32AddressCached(network, local.id)).hits;
         setRecents(saveRecent(network, { type: "address", id: h.id }));
         goToHref(`/explorer/${network}/${h.chain}/address/${h.id}`);
       } finally {

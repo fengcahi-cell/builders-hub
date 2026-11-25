@@ -86,6 +86,8 @@ E2E_BASE_URL=http://localhost:3000 npm test
 - Do not call `createPublicClient` in the toolbox. Use `usePublicClientForChain`, `makePublicClientForChain` or `useChainPublicClient`.
 - Folder names under `components/toolbox/console` are kebab-case, and so are the MDX import paths to them.
 
+**API** (`tests/unit/api/json-body-routes.test.ts`, every PR): a route that reads a JSON body parses it with a zod schema before use. Use `readJsonBody` from `lib/api/json-body.ts`. `tests/unit/api/json-body-routes.baseline.json` lists the routes that do not parse yet, and it can only get shorter.
+
 **E2E** (`scripts/check-e2e-location.sh`, every PR, forks too): browser and API tests go in `tests/e2e/`. A root `e2e/` folder, or an import of `@playwright/test` or `playwright/test`, fails CI.
 
 **Commits** (`commitlint.config.js`): `type(scope): subject`. Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`, `revert`. The subject starts in lower case and has no full stop. The header has at most 100 characters.
@@ -125,12 +127,27 @@ Do not edit these by hand:
 ## Environment
 
 The repo has no `.env.example`. Local dev reads `.env.local`. Most pages work without keys. Features that need keys:
-- Database and auth: `DATABASE_URL`, `NEXTAUTH_URL`, `NEXTAUTH_SECRET`, GitHub and Google OAuth.
-- Explorer data: `EXPLORER_API_URL` (default `https://stats-api.avax.network`), `STATS_QUERY_URL`, `STATS_QUERY_KEY`, `GLACIER_API_KEY`, `CCHAIN_DEBUG_RPC_URL`, `FUJI_DEBUG_RPC_URL`.
+- Database and auth: `DATABASE_URL`, `DATABASE_URL_UNPOOLED` (the direct Neon URL; `prisma migrate` needs it), `NEXTAUTH_URL`, `NEXTAUTH_SECRET`, GitHub and Google OAuth.
+- Explorer data: `EXPLORER_API_URL` (default `https://stats-api.avax.network`), `STATS_QUERY_URL`, `STATS_QUERY_KEY` (the Cloudflare WAF token for `/v2/query`), `GLACIER_API_KEY`, `CCHAIN_DEBUG_RPC_URL`, `FUJI_DEBUG_RPC_URL`.
 - AI features: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
 - Analytics: `NEXT_PUBLIC_POSTHOG_KEY`, `NEXT_PUBLIC_POSTHOG_HOST`.
 
 Never commit keys, private keys, internal hostnames or private IPs.
+
+## Database migrations
+
+The Vercel build applies pending Prisma migrations before `next build` (`scripts/migrate.mjs`). Do not run `prisma migrate deploy` by hand.
+
+- Production: each `master` deployment migrates the production database. The build fails if `DATABASE_URL_UNPOOLED` is not set.
+- Preview: the Neon Vercel integration gives each preview deployment its own Neon branch and sets `DATABASE_URL_UNPOOLED` for it. A preview without that variable does not migrate. Never set `DATABASE_URL_UNPOOLED` by hand for Preview.
+- Local `yarn build` does not migrate. Use `npx prisma migrate dev` against your own database.
+
+Rules:
+- A migration must work with the code that is live while the build runs, and with an instant rollback. Add first. Remove or rename in a later PR, after no deployed code uses the old name.
+- The build stops on a pending migration that drops a table or column, truncates, deletes rows, changes a column type or renames. To run one on purpose, add the line `-- destructive: approved` to its `migration.sql`.
+- Never edit a migration that a database has applied. Add a new one.
+
+To check a database read-only: `DATABASE_URL_UNPOOLED=<direct URL> npx prisma migrate status`. If a migration was applied by hand but has no row in `_prisma_migrations`, record it with `npx prisma migrate resolve --applied <folder>`.
 
 ## Explorer data
 

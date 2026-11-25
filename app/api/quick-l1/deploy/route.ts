@@ -1,9 +1,33 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { startMockDeployment } from '@/lib/quick-l1/mock-orchestrator';
-import type { DeployRequest, DeployResponse } from '@/lib/quick-l1/types';
+import type { DeployRequest, DeployResponse, ValidatorMode } from '@/lib/quick-l1/types';
+import { readJsonBody } from '@/lib/api/json-body';
 import { getUserId, rateLimited } from '@/app/api/managed-testnet-nodes/utils';
 import { getAuthSession } from '@/lib/auth/authSession';
 import { withQuickL1WafToken } from '@/lib/quick-l1/waf';
+import { reserveDailyProvision, retryAfterSeconds } from '@/server/services/provision-quota';
+
+// validatorMode and precompiles go to the quick-l1 service as sent, so their other keys pass through.
+const deployBodySchema = z.object({
+  chainName: z.string().optional(),
+  tokenSymbol: z.string().optional(),
+  ownerEvmAddress: z.string().optional(),
+  ownerPChainAddress: z.string().optional(),
+  network: z.string().optional(),
+  validatorMode: z.looseObject({ type: z.string() }).optional(),
+  precompiles: z
+    .looseObject({
+      nativeMinter: z.boolean().optional(),
+      feeManager: z.boolean().optional(),
+      rewardManager: z.boolean().optional(),
+      interoperability: z.boolean().optional(),
+      txAllowList: z.boolean().optional(),
+      contractDeployerAllowList: z.boolean().optional(),
+    })
+    .optional(),
+  enableManagedRelayer: z.boolean().optional(),
+});
 
 /**
  * POST /api/quick-l1/deploy
@@ -25,7 +49,9 @@ import { withQuickL1WafToken } from '@/lib/quick-l1/waf';
  * Rate limit: 5 deploys/min per account in prod. Each deploy provisions
  * a managed validator node, deploys ~7 contracts, and (optionally) bridges
  * tokens — this caps abusive bursts while staying well above legitimate
- * "I made a typo, retry" use.
+ * "I made a typo, retry" use. That limit lives in each instance's memory;
+ * the daily cap (QUICK_L1_DAILY_DEPLOYS, server/services/provision-quota.ts)
+ * is kept in the database and shared with Studio's Quick L1 launches.
  */
 async function rateLimitIdentifier(): Promise<string> {
   if (process.env.NODE_ENV === 'development') return 'dev-user';
@@ -47,12 +73,8 @@ async function handlePost(
     return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
   }
 
-  let clientBody: Partial<DeployRequest>;
-  try {
-    clientBody = (await request.json()) as Partial<DeployRequest>;
-  } catch {
-    return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
-  }
+  const clientBody = await readJsonBody(request, deployBodySchema);
+  if (!clientBody) return NextResponse.json({ error: 'Invalid request body' }, { status: 400 });
 
   if (!clientBody.chainName || !clientBody.tokenSymbol || !clientBody.ownerEvmAddress) {
     return NextResponse.json(
@@ -103,10 +125,10 @@ async function handlePost(
   const body: DeployRequest = {
     chainName: trimmedChainName,
     tokenSymbol: clientBody.tokenSymbol,
-    ownerEvmAddress: clientBody.ownerEvmAddress,
+    ownerEvmAddress: clientBody.ownerEvmAddress as `0x${string}`,
     ownerPChainAddress: clientBody.ownerPChainAddress,
     network: 'fuji',
-    validatorMode,
+    validatorMode: validatorMode as ValidatorMode,
     precompiles: clientBody.precompiles,
     enableManagedRelayer: clientBody.enableManagedRelayer ?? false,
     userId,
@@ -137,6 +159,15 @@ async function handlePost(
       return NextResponse.json(
         { error: 'BUILDER_HUB_URL not configured on this server' },
         { status: 503 },
+      );
+    }
+    // Daily cap per account, in the database so it holds across instances.
+    // Counted here, after validation and right before the upstream call.
+    const quota = await reserveDailyProvision(userId, 'quick-l1-deploy');
+    if (!quota.allowed) {
+      return NextResponse.json(
+        { error: quota.message },
+        { status: 429, headers: { 'retry-after': retryAfterSeconds(quota.resetAt) } },
       );
     }
     const res = await fetch(withQuickL1WafToken(`${upstream.replace(/\/$/, '')}/deploy`), {

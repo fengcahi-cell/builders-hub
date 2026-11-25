@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import l1ChainsData from "@/constants/l1-chains.json";
 import { getCumulativeTxs, getDailyTxsByChain } from "@/lib/explorer-clickhouse";
-import { DEDICATED_STATS_BASE_URL, resolveDedicatedMetricsChain } from "@/lib/dedicated-stats";
-import { assertPublicRpcTarget } from "@/lib/rpcUrlValidator";
 import { readNewBlocks } from "./new-blocks";
 
 interface Block {
@@ -785,48 +783,6 @@ async function fetchExplorerData(evmChainId: string, rpcUrl: string, coingeckoId
   };
 }
 
-// Glacier dependency removed: the explorer is now served entirely by the
-// self-hosted ClickHouse-backed APIs (/api/evm for EVM chains, /v1 + /api for
-// P-chain), so an external "is this chain Glacier-indexed?" probe is obsolete.
-// Kept as a no-op returning true so existing call sites (the `isIndexed` gate
-// and ExplorerContext) resolve without any external round-trip. Real coverage
-// is still gated by checkChainIndexed()/hasMetricsActivity.
-async function checkGlacierSupport(_chainId: string): Promise<boolean> {
-  return true;
-}
-
-// Probe metrics API for any non-zero activity over the last ~30 days.
-// Returns false if metrics API is unconfigured, errors out, or every value is zero —
-// which is our signal that the chain is not indexed yet. Chains served by the dedicated
-// metrics source are probed there (with their remapped id) instead of the shared API.
-async function checkChainIndexed(chainId: string): Promise<boolean> {
-  const baseUrl = DEDICATED_STATS_BASE_URL;
-  const resolvedChainId = resolveDedicatedMetricsChain(chainId) ?? chainId;
-  try {
-    const endTimestamp = Math.floor(Date.now() / 1000);
-    const startTimestamp = endTimestamp - 30 * 24 * 60 * 60;
-    const url = new URL(`${baseUrl}/v2/chains/${resolvedChainId}/metrics/cumulativeTxCount`);
-    url.searchParams.set('timeInterval', 'day');
-    url.searchParams.set('startTimestamp', String(startTimestamp));
-    url.searchParams.set('endTimestamp', String(endTimestamp));
-    url.searchParams.set('pageSize', '30');
-
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-    try {
-      const res = await fetch(url.toString(), { signal: controller.signal });
-      if (!res.ok) return false;
-      const data = await res.json();
-      const results: { value?: number }[] = Array.isArray(data?.results) ? data.results : [];
-      return results.some((r) => Number(r?.value) > 0);
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  } catch {
-    return false;
-  }
-}
-
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ chainId: string }> }
@@ -850,57 +806,36 @@ export async function GET(
     const lastFetchedBlockParam = searchParams.get('lastFetchedBlock');
     const lastFetchedBlock = lastFetchedBlockParam ? parseInt(lastFetchedBlockParam, 10) : undefined;
 
-    // Support custom chains by accepting rpcUrl as query parameter
-    const customRpcUrl = searchParams.get('rpcUrl');
-    const customTokenSymbol = searchParams.get('tokenSymbol');
-    const customBlockchainId = searchParams.get('blockchainId');
-
-    // Find chain config from static data
+    // The RPC comes from the chain list only. The server never fetches a URL
+    // that the caller supplies. A chain outside the list (one a user added
+    // in the browser) gets the price call only, with its own token symbol.
     const chain = l1ChainsData.find(c => c.chainId === chainId) as ChainConfig | undefined;
-    
-    // Determine effective RPC URL - prefer static config, fallback to query param
-    const rpcUrl = chain?.rpcUrl || customRpcUrl;
-    const tokenSymbol = chain?.networkToken?.symbol || customTokenSymbol || undefined;
-    const blockchainId = chain?.blockchainId || customBlockchainId || undefined;
+    const rpcUrl = chain?.rpcUrl;
+    const tokenSymbol = chain?.networkToken?.symbol || searchParams.get('tokenSymbol') || undefined;
+    const blockchainId = chain?.blockchainId;
     const coingeckoId = chain?.coingeckoId;
-    
-    // If no chain found and no custom rpcUrl provided, return 404
-    if (!chain && !customRpcUrl) {
-      return NextResponse.json({ error: "Chain not found. Provide rpcUrl query parameter for custom chains." }, { status: 404 });
+
+    if (!chain && !priceOnly) {
+      return NextResponse.json({ error: "Chain not found." }, { status: 404 });
     }
 
-    // Validate custom RPC URL: must be https and must not point to private/loopback addresses.
-    if (customRpcUrl && !(await assertPublicRpcTarget(customRpcUrl))) {
-      return NextResponse.json(
-        { error: "Invalid rpcUrl: must use https and must not target private or loopback addresses." },
-        { status: 400 }
-      );
-    }
-
-    // If priceOnly, just fetch price and glacier support (for ExplorerContext)
+    // priceOnly returns the token price and symbol. The response is the same
+    // for every visitor, so the CDN keeps it for 60 s. No caller reads an
+    // indexed flag here: the explorer layout gets it from fetchIndexedChainIds.
     if (priceOnly) {
       const priceOnlyStart = Date.now();
-      const [price, glacierSupported, hasMetricsActivity] = await Promise.all([
-        coingeckoId ? fetchPrice(coingeckoId) : Promise.resolve(undefined),
-        checkGlacierSupport(chainId),
-        checkChainIndexed(chainId),
-      ]);
+      const price = coingeckoId ? await fetchPrice(coingeckoId) : undefined;
       requestTiming.priceOnly = Date.now() - priceOnlyStart;
       requestTiming.total = Date.now() - requestStart;
 
-      // Chains on the dedicated metrics source aren't in Glacier, so don't gate their
-      // indexed status on Glacier support — their metrics activity alone is authoritative.
-      const isDedicatedChain = resolveDedicatedMetricsChain(chainId) !== undefined;
-      return NextResponse.json({
-        price,
-        tokenSymbol,
-        glacierSupported,
-        isIndexed: hasMetricsActivity && (glacierSupported || isDedicatedChain),
-      });
+      return NextResponse.json(
+        { price, tokenSymbol },
+        { headers: { "Cache-Control": "public, s-maxage=60, stale-while-revalidate=300" } },
+      );
     }
 
     if (!rpcUrl) {
-      return NextResponse.json({ error: "RPC URL not configured. Provide rpcUrl query parameter for custom chains." }, { status: 400 });
+      return NextResponse.json({ error: "RPC URL not configured for this chain." }, { status: 400 });
     }
 
     // If blocksOnly, return just the newest block headers: the All Networks
@@ -909,19 +844,12 @@ export async function GET(
       return NextResponse.json(await readNewBlocks(rpcUrl, lastFetchedBlock, Number(searchParams.get("txs")) || 0));
     }
 
-    // Fetch fresh data and check Glacier support in parallel
     const dataFetchStart = Date.now();
-    const [data, glacierSupported] = await Promise.all([
-      fetchExplorerData(chainId, rpcUrl, coingeckoId, tokenSymbol, blockchainId, initialLoad, lastFetchedBlock),
-      checkGlacierSupport(chainId),
-    ]);
+    const data = await fetchExplorerData(chainId, rpcUrl, coingeckoId, tokenSymbol, blockchainId, initialLoad, lastFetchedBlock);
     requestTiming.dataFetch = Date.now() - dataFetchStart;
     requestTiming.total = Date.now() - requestStart;
 
-    // Add glacierSupported to the response
-    const responseData = { ...data, glacierSupported };
-
-    return NextResponse.json(responseData);
+    return NextResponse.json(data);
   } catch (error) {
     requestTiming.total = Date.now() - requestStart;
     requestTiming.error = 1;

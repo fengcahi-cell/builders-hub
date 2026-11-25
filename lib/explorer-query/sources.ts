@@ -17,7 +17,9 @@ import { NETWORK_ID, PCHAIN_IDS, targetOf } from "./target";
 import type { SourceNote } from "./types";
 import { DAY, WEEK } from "./values";
 import { MAINNET_UPGRADES } from "@/constants/network-upgrades";
+import { avaxUsdNotes } from "./avax-usd";
 import { STAKE_FILL, gapNotes } from "./gaps";
+import { SUBNET_COLUMNS, subnetsSql } from "./pchain-sets";
 import { sqlWindow } from "./scope";
 import { upgradeTime } from "./upgrades";
 
@@ -396,6 +398,16 @@ const stakeFill: Source = {
   },
 };
 
+/** every subnet as it stands now: an L1 or not, and the validators in its set (pchain-sets.ts). The box's own rows, so
+    it is as fresh as the transactions and the newest L1 snapshot */
+const subnets: Source = {
+  columns: SUBNET_COLUMNS,
+  async build(chainId) {
+    const text = "Each subnet's validators now come from the P-Chain's own records: an L1's active seats from the newest L1 validator snapshot, and a subnet that has not converted from its AddSubnetValidatorTx terms that have not ended.";
+    return { sql: subnetsSql(chainId), note: { table: "p_subnets", label: "subnets and their validators", at: Date.now(), total: 1, known: 1, text } };
+  },
+};
+
 /** each network upgrade's mainnet activation (constants/network-upgrades.ts), on the mainnet P-Chain and C-Chain */
 const upgrades: Source = {
   columns: [["chain_id", "UInt64"], ["upgrade", "String"], ["activated_at", "DateTime('UTC')"], ["acps", "String"]],
@@ -634,6 +646,7 @@ const SOURCES: Record<string, Source> = {
   p_avax_supply_daily: supplyDaily,
   p_stake_fill: stakeFill,
   network_upgrades: upgrades,
+  p_subnets: subnets,
   dex_factories: factories,
   dex_tokens: tokens,
   lending_markets: markets,
@@ -662,6 +675,9 @@ export function refsIn(sql: string, chainId: number): string[] {
   return targetOf(chainId).refs.filter((r) => SOURCES[r] && reads(sql, r));
 }
 
+/** the lines a query's SQL alone calls for: the P-Chain gaps it reads, and where its AVAX/USD price comes from */
+const sqlNotes = (sql: string, chainId: number): SourceNote[] => [...gapNotes(sql, chainId), ...avaxUsdNotes(sql, chainId)];
+
 /** the SQL with each chain table it names, as this chain's rows, and
     each reference table it reads, defined in front of it; and what the
     reference tables cover. Throws when a source cannot be read or the
@@ -672,7 +688,7 @@ export async function withSources(sql: string, chainId: number): Promise<{ sql: 
   const scoped = scopeDefs(sql, chainId, ids);
   // the lending and family names the query reads (lending.ts, families.ts), on the C-Chain the registry describes
   const names = chainId === LENDING_CHAIN_ID ? namesIn(sql, SERVER_NAMES) : [];
-  if (used.length === 0 && scoped.length === 0 && names.length === 0) return { sql, sources: gapNotes(sql, chainId) };
+  if (used.length === 0 && scoped.length === 0 && names.length === 0) return { sql, sources: sqlNotes(sql, chainId) };
   const built = await Promise.all(used.map((r) => SOURCES[r].build(chainId, sql)));
   // the inner name is the table itself: a WITH does not see its own names. The chain tables come first, so the
   // names and reference tables after them read the same chain's rows as the query
@@ -685,14 +701,14 @@ export async function withSources(sql: string, chainId: number): Promise<{ sql: 
     const what = [...used, ...(names.length ? ["the names our server defines"] : []), ...(scoped.length ? ["its chain's tables"] : [])].join(" and ");
     throw new Error(`the query is too long to send with ${what}: the definitions take ${bytes - own} of the ${SQL_BUDGET} bytes the query service accepts, so the query may use ${SQL_BUDGET - (bytes - own)} and it uses ${own}. Write a shorter query.`);
   }
-  return { sql: out, sources: [...built.map((b) => b.note), ...gapNotes(sql, chainId)] };
+  return { sql: out, sources: [...built.map((b) => b.note), ...sqlNotes(sql, chainId)] };
 }
 
 /** what the reference tables a query reads cover, for an answer made without anchored() */
 export async function sourceNotes(sql: string, chainId: number): Promise<SourceNote[]> {
   const used = refsIn(sql, chainId);
   const built = used.length ? await within(Promise.all(used.map(async (r) => (await SOURCES[r].build(chainId, sql)).note)), 4000, []) : [];
-  return [...built, ...gapNotes(sql, chainId)];
+  return [...built, ...sqlNotes(sql, chainId)];
 }
 
 /** the version lines in the set, newest first, as last read; null before the first read. Reads nothing */

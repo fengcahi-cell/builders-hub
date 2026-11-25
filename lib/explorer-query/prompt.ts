@@ -5,6 +5,7 @@
 import { createHash } from "node:crypto";
 import { HASH_RANGE, MAX_ROWS } from "./guard";
 import { CREATED, QUOTES, U, pxCte, topic } from "./macros";
+import { AVAX_USD_CHAIN_ID, avaxUsdExample, avaxUsdRule } from "./avax-usd";
 import { DEX_CHAIN_ID, DEX_FACTORIES, DEX_PRICE_POOL, DEX_PROTOCOLS, DEX_TOPICS, FIRST_DAY, V2_FEE_PROTOCOLS, dexFamilies, dexQuestion, type DexFamily } from "./protocols";
 import { AAVE_ASSETS, AAVE_SLUG, LENDING_CHAIN_ID, LENDING_MARKETS, LENDING_PROTOCOLS } from "./lending";
 import { FAMILY_CHAIN_ID, OPENTRADE_POOLS, SILOS, VAULTS } from "./families";
@@ -13,6 +14,7 @@ import { registryTurn } from "./registry-turn";
 import { mevExamples, mevRules, mevTurn } from "./mev";
 import { ICTT_VERSION, icttChain, icttExamples, icttRules, icttTurn } from "./ictt";
 import { knownLines, refLine, refSchema } from "./sources";
+import { latestSnapshot } from "./pchain-sets";
 import { MAINNET_UPGRADES } from "@/constants/network-upgrades";
 import { gapsLine } from "./gaps";
 import { upgradeTime, upgradeTurn, upgradesLine } from "./upgrades";
@@ -462,7 +464,7 @@ ${opts.coverage ? `\n${opts.coverage}` : ""}
 ${
   c
     ? `- Gas, per ACP-194 (Continuous Execution, live since the Helicon upgrade): raw_blocks.gas_used is the gas RESERVED (the sum of the block's tx gas limits, what fills the block against gas_limit). raw_txs.gas_used is the gas CHARGED per receipt, max(used, half the limit); fees are paid on it. Fees paid in wei = toFloat64(gas_used) * gas_price. Divide by 1e18 for ${opts.symbol}. The C-Chain burns every fee.
-- Use these names in titles and notes, never "gas used" for the block figure. A sum of raw_txs.gas_used is gas charged, per block, per hour or per contract alike (name it gas_charged); gas reserved comes only from raw_blocks.gas_used.${opts.chainId === 43114 ? `\n${upgradesLine(true)}` : ""}`
+- Use these names in titles and notes, never "gas used" for the block figure. A sum of raw_txs.gas_used is gas charged, per block, per hour or per contract alike (name it gas_charged); gas reserved comes only from raw_blocks.gas_used.${opts.chainId === AVAX_USD_CHAIN_ID ? `\n${upgradesLine(true)}\n${avaxUsdRule()}` : ""}`
     : `- Gas: raw_blocks.gas_used is the block's gas used, against gas_limit. raw_txs.gas_used is the gas charged per receipt; fees are paid on it. Fees paid in wei = toFloat64(gas_used) * gas_price. Divide by 1e18 for ${opts.symbol}. Whether an L1 burns its fees or pays them to a fee recipient depends on its configuration: say "fees paid", never "burned". A fee question also reads raw_blocks.miner over the same window, as the worked example "Fees per bucket" shows, and the note says where the fees went: to the burn address when not_burned is 0, that is when every block's miner is 0x0100000000000000000000000000000000000000, the one case where it may say "burned"; else to the one recipient, by its full address, when recipients is 1; else to how many recipients. That address or count is the one exception to the note rules against hex, addresses and counts.`
 }
 - ERC-20 Transfer logs: topic0 = unhex('ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef'); topic1 = from, topic2 = to (left-padded to 32 bytes, address is the last 20 bytes); data = amount (uint256, big endian: reinterpretAsUInt256(reverse(data))). A transfer's sender and recipient are lower(concat('0x', hex(substring(topic1, 13, 20)))) AS from_address and the same over topic2 AS to_address. Never take them from tx_from, tx_to or raw_logs.address: those are the transaction's sender, the contract it called and the token contract. An ERC-20 transfer has no topic3 (topic3 IS NULL): an ERC-721 Transfer has the same topic0 and its token id in topic3, so a count of token transfers filters topic3 IS NULL, and a note that says ERC-20 or three topics holds only with that filter. ${
@@ -528,7 +530,7 @@ Then render_chart with the fee query, and a note that says where the fees went:`
 }
 SELECT toStartOfHour(block_time) AS t, sum(toFloat64(gas_used) * gas_price) / 1e18 AS fees_${opts.symbol.toLowerCase()}, max(toFloat64(gas_used) * gas_price) / 1e18 AS max_fee_${opts.symbol.toLowerCase()}, concat('0x', lower(hex(argMax(hash, toFloat64(gas_used) * gas_price)))) AS max_fee_tx, count() AS txs FROM raw_txs WHERE chain_id = ${opts.chainId} AND block_time >= toStartOfHour(now()) - INTERVAL 24 HOUR GROUP BY t ORDER BY t
 
-Gas charged against ${c ? "gas reserved" : "the blocks' gas used"} per hour (charged from the receipts in raw_txs, ${c ? "reserved" : "the block figure"} from raw_blocks):
+${opts.chainId === AVAX_USD_CHAIN_ID ? avaxUsdExample(opts.chainId, opts.symbol) : ""}Gas charged against ${c ? "gas reserved" : "the blocks' gas used"} per hour (charged from the receipts in raw_txs, ${c ? "reserved" : "the block figure"} from raw_blocks):
 SELECT t, c.gas_charged AS gas_charged, b.${c ? "gas_reserved" : "block_gas_used"} AS ${c ? "gas_reserved" : "block_gas_used"} FROM (SELECT toStartOfHour(block_time) AS t, sum(gas_used) AS gas_charged FROM raw_txs WHERE chain_id = ${opts.chainId} AND block_time >= toStartOfHour(now()) - INTERVAL 24 HOUR GROUP BY t) AS c INNER JOIN (SELECT toStartOfHour(block_time) AS t, sum(gas_used) AS ${c ? "gas_reserved" : "block_gas_used"} FROM raw_blocks WHERE chain_id = ${opts.chainId} AND block_time >= toStartOfHour(now()) - INTERVAL 24 HOUR GROUP BY t) AS b USING t ORDER BY t
 
 ${
@@ -590,26 +592,41 @@ const HELICON_FROM = `toDate('${upgradeTime(HELICON).slice(0, 10)}') - INTERVAL 
     (sources.ts); left out, the lines last read; null, none */
 export function pchainPrompt(opts: { chainId: number; network: string; schema: string; coverage: string | null; lines?: string[] | null }): string {
   const id = opts.chainId;
-  // the newest snapshot that holds as many rows as the one before it, or is 15 minutes old: a snapshot still being
-  // written holds fewer rows. Mainnet only: 15 minutes alone read r12's H16 from a snapshot 24 minutes old, one
-  // validator short, where a 13-minute one was complete. Fuji's stays as it was
-  const latest = (t: string) =>
-    isFuji(id)
-      ? `(SELECT max(snapshot_time) FROM ${t} WHERE chain_id = ${id} AND snapshot_time <= now() - INTERVAL 15 MINUTE AND snapshot_time >= now() - INTERVAL 1 DAY)`
-      : `(SELECT max(snap_t) FROM (SELECT snapshot_time AS snap_t, count() AS snap_rows, lagInFrame(count()) OVER (ORDER BY snapshot_time ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS snap_before FROM ${t} WHERE chain_id = ${id} AND snapshot_time >= now() - INTERVAL 1 DAY GROUP BY snapshot_time) WHERE (snap_before > 0 AND snap_rows >= snap_before) OR snap_t <= now() - INTERVAL 15 MINUTE)`;
+  const latest = (t: string) => latestSnapshot(t, id);
   const primary = "unhex(repeat('00', 32))";
   const live = opts.lines === undefined ? knownLines(id) : opts.lines;
   const lines = live?.length ? live : ["1.15", "1.14"];
   // the Data API counts the supply on mainnet only (target.ts)
   const supply = targetOf(id).refs.includes("p_avax_supply");
+  // mainnet only: what a subnet is before it converts, and each subnet as it stands now (pchain-sets.ts). The writer
+  // read "active subnets that have not converted" as every subnet with no conversion, most of which run no validator
+  const sets = targetOf(id).refs.includes("p_subnets");
+  const subnetRules = sets
+    ? `
+- Subnets: a CreateSubnetTx creates a subnet, and its tx_id is the subnet's id (the row's own subnet_id is NULL). A CreateChainTx adds a blockchain to it (subnet_id, chain_name). Until a ConvertSubnetToL1Tx makes it an L1 it is a legacy subnet: its owner gives each validator a term with an AddSubnetValidatorTx (subnet_id, node_id, weight, start_time, end_time), and the term holds the seat until end_time (at most a year) unless a RemoveSubnetValidatorTx (subnet_id, node_id) came after it. A legacy subnet's weight is a number its owner sets, like an L1's: never AVAX. Its validators are Primary Network validators too, so their stake and uptime are in p_validator_snapshots under the same node (node_id is text there: ${NODE("decoded_p_txs.node_id")}). Most subnets ever created run no validator now: a creation, a chain or a missing conversion never makes a subnet active.
+- p_subnets: one row per subnet a CreateSubnetTx created, as it stands now; the Primary Network is not in it. subnet_id is CB58 text (return it as subnet_id and the server names it), created_at, chains (the blockchains created on it), chain_name (its newest chain's name on the P-Chain, '' when it has none), is_l1 and converted_at (its ConvertSubnetToL1Tx), validators (the validators in its set now: an L1's active seats, or a legacy subnet's terms that have not ended) and validators_until (legacy subnets only: when its last term ends, so when its set empties unless a term is added). Our server builds it from the tables above with each query, so a read of it needs no time bound. Any question about subnets or L1s as a set (which are active, live, running or dead; which have or have not converted; how many run validators) reads p_subnets, and active, live or running means validators > 0. To join it to another table, encode that table's id the same way: ${CB58("assumeNotNull(decoded_p_txs.subnet_id)")} = p_subnets.subnet_id.`
+    : "";
+  const subnetExamples = sets
+    ? `
+Legacy subnets that run validators now, the active subnets that have not converted to an L1 (the server names the subnet); drill into one subnet's terms:
+SELECT subnet_id, validators, toString(validators_until) AS last_term_ends, chain_name, toString(toDate(created_at)) AS created FROM p_subnets WHERE chain_id = ${id} AND is_l1 = 0 AND validators > 0 ORDER BY validators DESC
+drill: SELECT block_time AS t, block_height, ${CB58("tx_id")} AS tx_id, tx_type, ${NODE("node_id")} AS node_id, weight, toString(end_time) AS ends FROM decoded_p_txs WHERE chain_id = ${id} AND block_time >= now() - INTERVAL 366 DAY AND tx_type = 'AddSubnetValidatorTx' AND subnet_id = {{subnet_id:bytes}} AND end_time > now() ORDER BY block_time DESC LIMIT 50
+
+Every subnet by what it is now (the whole set, in groups):
+SELECT multiIf(is_l1 = 1 AND validators > 0, 'L1 with validators', is_l1 = 1, 'L1 with no active validator', validators > 0, 'Legacy subnet with validators', chains > 0, 'Legacy subnet with no validator', 'No chain') AS state, count() AS subnets, sum(validators) AS validators_now FROM p_subnets WHERE chain_id = ${id} GROUP BY state ORDER BY subnets DESC
+`
+    : "";
   // mainnet only, from the P-Chain audit: rewards read from their outputs (P08 said they cannot be summed), a
   // registration count named as one (P06 called 22 renewals of 26 new validators), and the last N days as N whole
-  // days and today (P09 and P15 read 6 days and today). Fuji's prompt stays as it was
+  // days and today (P09 and P15 read 6 days and today). And stake that renews is not stake that unlocks: "AVAX that
+  // unlocks in 7 days" counted 3.05M AVAX of 47 auto-renewed validators (of 43 whose cycle ended in the 8 days to
+  // 2026-11-11, 42 stayed in the set under the same tx_id). Fuji's prompt stays as it was
   const audited = isFuji(id)
     ? ""
     : `
 - raw_p_reward_utxos: one row per reward output, paid to a validator or a delegator when its staking period ends (block_time is when). Its AVAX is reinterpretAsUInt64(reverse(substring(utxo_bytes, 75, 8))) / 1e9, the 8-byte amount after the output's type id: sum it for the AVAX paid in staking rewards. It is never returned stake, and never decoded_p_txs.reward_paid, which is set on few reward transactions.
-- Registrations: an AddPermissionlessValidatorTx, AddValidatorTx or AddAutoRenewedValidatorTx registers a validation period, and a node that renews registers again. A count of them is a count of registrations, renewals included: its title and note say registrations, never new validators. A question about validators counts nodes, uniqExact(node_id), beside the registrations, and the new ones: the nodes with no registration before the window, node_id NOT IN (SELECT node_id FROM decoded_p_txs WHERE chain_id = ${id} AND tx_type IN ('AddPermissionlessValidatorTx', 'AddValidatorTx', 'AddAutoRenewedValidatorTx') AND block_time < the window's start).`;
+- Registrations: an AddPermissionlessValidatorTx, AddValidatorTx or AddAutoRenewedValidatorTx registers a validation period, and a node that renews registers again. A count of them is a count of registrations, renewals included: its title and note say registrations, never new validators. A question about validators counts nodes, uniqExact(node_id), beside the registrations, and the new ones: the nodes with no registration before the window, node_id NOT IN (SELECT node_id FROM decoded_p_txs WHERE chain_id = ${id} AND tx_type IN ('AddPermissionlessValidatorTx', 'AddValidatorTx', 'AddAutoRenewedValidatorTx') AND block_time < the window's start).
+- Stake that ends: in p_validator_snapshots, next_period > 0 marks an auto-renewed validator (it is NULL on every other one). Its end_time is the end of its current cycle, not of its stake: it starts the next cycle of next_period seconds under the same tx_id, so its stake does not unlock. A question about stake that ends, expires or unlocks keeps the two apart, sumIf(weight, ifNull(next_period, 0) = 0) / 1e9 AS unlocking_avax beside sumIf(weight, ifNull(next_period, 0) > 0) / 1e9 AS renewing_avax, and the note says the renewing stake stays staked.`;
   // the auto-renewed staking transactions (ACP-236), and the reward a RewardValidatorTx paid, which reward_paid does
   // not hold (P09 put RewardAutoRenewedValidatorTx under other)
   const renewed = isFuji(id)
@@ -631,10 +648,10 @@ ${opts.coverage ? `\n${opts.coverage}` : ""}
   id === PCHAIN_IDS.fuji
     ? " On Fuji, ConvertSubnetToL1Tx rows carry no l1_validation_ids or l1_balances (they were indexed before those columns were decoded), so the first validators of a new L1 cannot be counted here: count registrations from RegisterL1ValidatorTx, carry the conversions beside them, and say in the note that the first validators of new L1s are not included."
     : ""
-}
+}${subnetRules}
 - Amounts (weight, stake_amount, balance, l1_balance, amount, supply) are nAVAX: divide by 1e9 for AVAX. An L1 validator's weight (p_l1_validator_snapshots.weight, l1_weight) is a unitless number the L1 sets: never divide it by 1e9, and never call it AVAX or stake.${isFuji(id) ? "" : " A sum of nAVAX is a whole number, and a whole number times it wraps past the UInt64 limit once the stake passes 184M AVAX, with no error: make the sum a decimal before any multiply, 100 * (sum(weight) / 1e9)."}
 - The snapshot tables (p_validator_snapshots, p_delegator_snapshots, p_l1_validator_snapshots) are photographs of the sets, taken about every 11 minutes. A snapshot's rows are written over several minutes under one snapshot_time, so the newest can be half written: for the current set, read snapshot_time = ${latest("<table>")}. That expression already passes over a snapshot still being written, so the note never mentions it. For a history, group by snapshot_time and keep the snapshots at least 15 minutes old. In snapshots, node_id and ids are already text (NodeID-…).
-- The Primary Network's subnet_id is 32 zero bytes: subnet_id = ${primary}. Other subnet_id values are L1s.
+- The Primary Network's subnet_id is 32 zero bytes: subnet_id = ${primary}. ${sets ? "p_validator_snapshots and p_delegator_snapshots hold the Primary Network alone, and p_l1_validator_snapshots the L1s' seats: a legacy subnet's validators are in no snapshot table." : "Other subnet_id values are L1s."}
 - p_l1_validator_snapshots: an L1's seats. balance is what is left to pay the continuous fee (net of what has burned); a seat with balance 0 is inactive. A question about balances reads the active seats only (balance > 0), returns the L1 (subnet_id, which the server names) and the days the balance lasts (days_left) at the fee a seat pays per day, as in the worked example.
 - Fees paid: the Convert, Register and IncreaseL1ValidatorBalance deposits minus the balances left overstate the continuous fees L1 validators have paid, because a removed or disabled seat's balance is refunded to its owner and the tables do not mark refunds. ${supply ? "For the fees paid, read p_avax_supply.l1_validator_fees_avax, as in the worked example." : "Give that figure only as an upper bound, and say so in the note."}
 - p_exec_state_history: the P-Chain supply after each block (nAVAX), the AVAX the P-Chain counts as issued, gross of what the C-Chain and X-Chain burned. Call it the P-Chain supply, never the AVAX supply or the total supply.${supply ? " The total supply net of every chain's burns is p_avax_supply.total_supply_avax, and on past days p_avax_supply_daily.total_supply_avax: a share of the supply divides by that, never by the P-Chain supply." : ""}
@@ -702,7 +719,7 @@ drill: SELECT block_time AS t, block_height, ${CB58("tx_id")} AS tx_id, tx_type,
 
 L1s by active validators now, with the balance left for fees (the server names the L1):
 SELECT ${CB58("subnet_id")} AS subnet_id, count() AS validators, sum(balance) / 1e9 AS balance_avax FROM p_l1_validator_snapshots WHERE chain_id = ${id} AND balance > 0 AND snapshot_time = ${latest("p_l1_validator_snapshots")} GROUP BY subnet_id ORDER BY validators DESC
-
+${subnetExamples}
 The 20 active L1 seats with the least balance left, and the days it lasts at the fee a seat pays per day (the server names the L1):
 WITH ${latest("p_l1_validator_snapshots")} AS s_now, (SELECT max(snapshot_time) FROM p_l1_validator_snapshots WHERE chain_id = ${id} AND snapshot_time <= s_now - INTERVAL 1 DAY AND snapshot_time >= s_now - INTERVAL 2 DAY) AS s_day, fee AS (SELECT median(d.balance - n.balance) * 86400 / dateDiff('second', s_day, s_now) AS per_day FROM p_l1_validator_snapshots AS n INNER JOIN p_l1_validator_snapshots AS d ON d.validation_id = n.validation_id WHERE n.chain_id = ${id} AND d.chain_id = ${id} AND n.snapshot_time = s_now AND d.snapshot_time = s_day AND n.balance > 0 AND d.balance > n.balance) SELECT ${CB58("subnet_id")} AS subnet_id, node_id, balance / 1e9 AS balance_avax, round(balance / (SELECT per_day FROM fee), 1) AS days_left, count() OVER () AS of_total FROM p_l1_validator_snapshots WHERE chain_id = ${id} AND snapshot_time = s_now AND balance > 0 ORDER BY balance ASC LIMIT 20
 

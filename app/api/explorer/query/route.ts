@@ -1,18 +1,25 @@
 import { NextResponse, after } from "next/server";
+import { z } from "zod";
+import { readJsonBody } from "@/lib/api/json-body";
 import l1ChainsData from "@/constants/l1-chains.json";
 import { guardSql } from "@/lib/explorer-query/guard";
-import { runQuery, anchored, indexState, type ColumnMeta, type QueryResult } from "@/lib/explorer-query/clickhouse";
-import type { Turn } from "@/lib/explorer-query/types";
+import { runQuery, anchored, indexState, type QueryResult } from "@/lib/explorer-query/clickhouse";
 import { nameRows } from "@/lib/explorer-query/enrich";
 import { siteBaseUrl } from "@/lib/chat/site-url";
-import { designVisual, writeReading } from "@/lib/explorer-query/visual";
+import { designVisual } from "@/lib/explorer-query/visual";
+import { writeReading } from "@/lib/explorer-query/reading";
+import { showPrice } from "@/lib/explorer-query/avax-usd";
 import { markUpgrades, upgradeLines } from "@/lib/explorer-query/upgrades";
 import type { ChartSpec, Names, QueryAnswer, Totals } from "@/lib/explorer-query/types";
 import { monitorNote } from "@/lib/explorer-query/monitor";
 import { monitorFor } from "@/lib/explorer-query/monitor-feed";
 import { answerQuestion, drillSql, keptWords, type QueryEvent } from "@/lib/explorer-query/answer";
-import { totalsOf } from "@/lib/explorer-query/cut";
+import { cutOf, totalsOf } from "@/lib/explorer-query/cut";
+import { msOf } from "@/lib/explorer-query/edges";
+import { answerMoves, movedSql, movedWords, priorOf } from "@/lib/explorer-query/window-ops";
+import { SPANS, type SpanKey } from "@/lib/explorer-query/window-shift";
 import { getRecipe, putVisual } from "@/lib/explorer-query/cache";
+import { fixedRecipe } from "@/lib/explorer-query/fixed";
 import { isKept, runKept } from "@/lib/explorer-query/run-cache";
 import { profileSql, type DrillProfile } from "@/lib/explorer-query/drill-profile";
 import { sourceNotes } from "@/lib/explorer-query/sources";
@@ -27,29 +34,60 @@ import type { ModelCall } from "@/lib/explorer-query/meter";
    it ends, then the answer with its rows and the SQL that made them, so
    every figure can be audited and re-run by hand. POST { sql } re-runs a
    query the reader edited; POST { drill } opens one row into its
-   records; POST { design } lays out rows the page already has. Each
+   records; POST { design } lays out rows the page already has; POST
+   { move } reads an answer again over another span, and POST { prior }
+   over the period before its window (window-ops.ts). Each
    question, and what its model calls cost, goes to PostHog
    (lib/explorer-query/analytics.ts). */
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
 
-interface Body {
-  chainId?: string | number;
-  prompt?: string;
-  history?: Turn[];
-  sql?: string;
-  /** open one row of an answer into its records; span is the opened mark's bucket, in unix seconds */
-  drill?: { sql: string; row: Record<string, unknown>; span?: [number, number] };
+/* The body, in each of its shapes. A field of the wrong type is read as absent (.catch), as the checks below read it,
+   so each shape is answered as before, and each field the route reads has its type. */
+const bodySchema = z.object({
+  chainId: z.union([z.string(), z.number()]).optional().catch(undefined),
+  prompt: z.string().optional().catch(undefined),
+  history: z.array(z.object({ prompt: z.string(), sql: z.string(), title: z.string().catch("") })).optional().catch(undefined),
+  sql: z.string().optional().catch(undefined),
+  /** with sql: the column the answer's chart runs along, so the page learns whether its window can move */
+  x: z.string().optional().catch(undefined),
+  /** read an answer again over another span: its query, its drill and its words, as the page holds them */
+  move: z
+    .object({
+      sql: z.string(),
+      drill: z.string().nullish().catch(undefined),
+      x: z.string().optional().catch(undefined),
+      span: z.string(),
+      title: z.string().optional().catch(undefined),
+      note: z.string().optional().catch(undefined),
+    })
+    .optional()
+    .catch(undefined),
+  /** read an answer's query over the period before its window */
+  prior: z.object({ sql: z.string(), x: z.string().optional().catch(undefined) }).optional().catch(undefined),
+  /** open one row of an answer into its records; span is the opened mark's bucket, in unix seconds (binsOf checks it) */
+  drill: z.object({ sql: z.string(), row: z.record(z.string(), z.unknown()), span: z.unknown().optional() }).optional().catch(undefined),
   /** lay out a kept answer, by its key */
-  key?: string;
+  key: z.string().optional().catch(undefined),
   /** with key: write the kept layout's reading again from fresh rows */
-  reading?: boolean;
+  reading: z.boolean().optional().catch(undefined),
   /** with key or design: the PostHog trace of the question the layout serves */
-  trace?: string;
-  /** lay out rows the page already has */
-  design?: { question: string; title: string; note: string; columns: ColumnMeta[]; rows: Record<string, unknown>[]; names: Names; chart: ChartSpec };
-}
+  trace: z.string().optional().catch(undefined),
+  /** lay out rows the page already has; the chart goes to the designer as the page sent it */
+  design: z
+    .object({
+      question: z.string().optional().catch(undefined),
+      title: z.string().optional().catch(undefined),
+      note: z.string().optional().catch(undefined),
+      columns: z.array(z.object({ name: z.string(), type: z.string() })),
+      rows: z.array(z.record(z.string(), z.unknown())),
+      names: z.record(z.string(), z.record(z.string(), z.string())).optional().catch(undefined),
+      chart: z.custom<ChartSpec>((v) => typeof v === "object" && v !== null).optional().catch(undefined),
+    })
+    .optional()
+    .catch(undefined),
+});
 
 /* An answer's own read, kept a minute under its key on this instance: the layout the page asks for next is designed
    from the rows the reader was shown, not from a second read of the same SQL (a full scan again, and the totals with
@@ -112,7 +150,9 @@ async function binsOf(sql: string, span: unknown, chainId: number): Promise<Dril
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => ({}))) as Body;
+  const body = await readJsonBody(req, bodySchema);
+  // a body that is not a JSON object names no chain
+  if (!body) return NextResponse.json({ error: "unknown chain" }, { status: 400 });
   // the network (the C-Chain and every mainnet L1) by its slug; any other target by its chain id
   const chainId = body.chainId === NETWORK_SLUG ? NETWORK_ID : Number(body.chainId);
   // the P-Chain's tables key their rows 1 (mainnet) and 5 (Fuji); EVM chains by their chain id
@@ -156,6 +196,41 @@ export async function POST(req: Request) {
     }
   }
 
+  // a window button: the answer's own query over another span, no model
+  if (body.move && typeof body.move.sql === "string" && SPANS.some((s) => s.key === body.move!.span)) {
+    const mv = body.move;
+    const [x, span] = [typeof mv.x === "string" ? mv.x : undefined, mv.span as SpanKey];
+    const moved = movedSql(mv.sql, typeof mv.drill === "string" ? mv.drill : null, x, span, chainId, Date.now());
+    if (!moved.ok) return NextResponse.json({ error: moved.error }, { status: 400 });
+    const over = overReads(req, moved.sql, chainId);
+    if (over) return over;
+    try {
+      const run = await runKept(moved.sql, chainId);
+      const result = { ...run.result, truncated: run.result.truncated || !!cutOf(moved.sql, run.result.rowCount) };
+      const [names, totals] = await Promise.all([nameRows(chainId, result.columns, result.rows, baseUrl), totalsOf(moved.sql, result, chainId)]);
+      if (totals && totals.rows <= result.rowCount) result.truncated = false;
+      const now = run.anchor ? msOf(run.anchor) : Date.now();
+      const said = movedWords({ title: String(mv.title ?? "").slice(0, 200), note: String(mv.note ?? "").slice(0, 800) }, mv.sql, moved.sql, x, span, result.rows, chainId, now, Date.now());
+      return NextResponse.json({ ...said, sql: moved.sql, drill: moved.drill, result, names, totals, anchor: run.anchor, sources: run.sources, moves: answerMoves(moved.sql, x, chainId, Date.now()) });
+    } catch (e) {
+      return NextResponse.json({ error: e instanceof Error ? e.message : "query failed" }, { status: 400 });
+    }
+  }
+
+  // the period before an answer's window: the same query, its window moved back by its own length, no model
+  if (body.prior && typeof body.prior.sql === "string") {
+    const before = priorOf(body.prior.sql, typeof body.prior.x === "string" ? body.prior.x : undefined, chainId, Date.now());
+    if (!before.ok) return NextResponse.json({ error: before.error }, { status: 400 });
+    const over = overReads(req, before.sql, chainId);
+    if (over) return over;
+    try {
+      const { result } = await runKept(before.sql, chainId);
+      return NextResponse.json({ result, totals: await totalsOf(before.sql, result, chainId) });
+    } catch (e) {
+      return NextResponse.json({ error: e instanceof Error ? e.message : "query failed" }, { status: 400 });
+    }
+  }
+
   // the reader edited the SQL: run it, no model
   if (typeof body.sql === "string" && !body.prompt) {
     const g = guardSql(body.sql, chainId);
@@ -166,8 +241,9 @@ export async function POST(req: Request) {
       // a board's tiles: many readers, one run a minute per query
       const run = await runKept(g.sql, chainId);
       const result = run.result;
-      const names = await nameRows(chainId, result.columns, result.rows, baseUrl);
-      return NextResponse.json({ sql: g.sql, result, names, anchor: run.anchor, sources: run.sources });
+      // rows a LIMIT cut carry the whole result's figures, as an answer's do, so a tile's figures stay whole after a refresh
+      const [names, totals] = await Promise.all([nameRows(chainId, result.columns, result.rows, baseUrl), totalsOf(g.sql, result, chainId)]);
+      return NextResponse.json({ sql: g.sql, result, names, totals, anchor: run.anchor, sources: run.sources, moves: answerMoves(g.sql, typeof body.x === "string" ? body.x : undefined, chainId, Date.now()) });
     } catch (e) {
       return NextResponse.json({ error: e instanceof Error ? e.message : "query failed" }, { status: 400 });
     }
@@ -199,7 +275,7 @@ export async function POST(req: Request) {
       const { result, names, totals, anchor } = await readOf(body.key, recipe.sql, chainId, baseUrl);
       const said = keptWords(recipe, recipe.sql, result.rows, anchor, chainId);
       const out = await designVisual({ question: recipe.question, title: said.title, note: compared(said.note, recipe, result.rows, chainId), symbol, columns: result.columns, rows: result.rows, names, chart: recipe.chart, totals, sql: recipe.sql, anchor, spent });
-      out.visual = markUpgrades(out.visual, recipe.question, result.rows, chainId);
+      out.visual = showPrice(markUpgrades(out.visual, recipe.question, result.rows, chainId), result.rows, chainId);
       if (out.fromDesigner) await putVisual(body.key, out.visual);
       // the design's own time, its model steps and each visual its tool turned back: a slow layout shows whether it retried
       return NextResponse.json({ visual: out.visual, designer: out.fromDesigner, ms: out.ms, steps: out.steps, refused: out.refused?.length ? out.refused : undefined, error: out.fromDesigner ? undefined : out.error });
@@ -257,17 +333,21 @@ export async function POST(req: Request) {
     return NextResponse.json({ error }, { status: 404 });
   }
 
-  // the same budget as the chat: model calls are the cost here
   const session = await getAuthSession();
   const isAuthenticated = !!session?.user?.id;
   const who = askerOf(req, session?.user?.id);
-  const limit = checkChatRateLimit(isAuthenticated ? session!.user!.id! : getClientIP(req), isAuthenticated);
+  // a suggestion runs its fixed SQL and asks no model: it is a read, counted with the reads and not with the questions.
+  // Any other question takes the same budget as the chat: model calls are the cost there
+  const fixed = history.length === 0 && !!fixedRecipe(chainId, prompt, symbol);
+  const limit = fixed ? checkChatRateLimit(getClientIP(req), false, READS, "query-read") : checkChatRateLimit(isAuthenticated ? session!.user!.id! : getClientIP(req), isAuthenticated);
   if (!limit.allowed) {
-    // signed out, the reader can lift the limit now: the page offers sign-in
+    // signed out, the reader can lift the question limit now: the page offers sign-in
     const when = formatResetTime(limit.resetTime);
-    const out = isAuthenticated
-      ? { error: `Question limit reached. Try again ${when}.` }
-      : { error: `You have asked ${limit.limit} questions this hour. Sign in to keep asking, or try again ${when}.`, signIn: true };
+    const out = fixed
+      ? { error: `This address has run ${limit.limit} queries this hour. Try again ${when}.` }
+      : isAuthenticated
+        ? { error: `Question limit reached. Try again ${when}.` }
+        : { error: `You have asked ${limit.limit} questions this hour. Sign in to keep asking, or try again ${when}.`, signIn: true };
     after(() => asked(who, { failed: { error: out.error, status: 429 } }));
     return NextResponse.json(out, { status: 429 });
   }
@@ -291,7 +371,7 @@ export async function POST(req: Request) {
         // what the server's tables in the answer cover, for the page to state
         if (answer?.sql && !answer.sources) answer.sources = await sourceNotes(answer.sql, chainId);
         // the page sends the trace back with the answer's layout and reading, so their model calls join the question's
-        if (answer) emit({ type: "answer", answer: { ...answer, trace } });
+        if (answer) emit({ type: "answer", answer: { ...answer, trace, moves: answer.result ? answerMoves(answer.sql, answer.chart.x, chainId, Date.now()) : null } });
       } catch (e) {
         emit({ type: "error", error: e instanceof Error ? e.message : "the query failed", status: 500 });
       } finally {

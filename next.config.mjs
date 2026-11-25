@@ -478,6 +478,11 @@ const config = {
         permanent: true,
       },
       {
+        source: '/integrations/areta',
+        destination: '/audits',
+        permanent: true,
+      },
+      {
         source: '/docs/dapps/end-to-end/launch-ethereum-dapp',
         destination: '/academy/blockchain/solidity-foundry',
         permanent: true,
@@ -752,6 +757,17 @@ const config = {
         destination: '/docs/rpcs/c-chain/txn-format',
         permanent: true,
       },
+      // AvalancheGo v1.15.4 removes platform.getBalance and platform.getStake.
+      {
+        source: '/docs/rpcs/p-chain/balances-utxos/platform_getBalance',
+        destination: '/docs/rpcs/p-chain/balances-utxos/platform_getUTXOs',
+        permanent: true,
+      },
+      {
+        source: '/docs/rpcs/p-chain/staking/platform_getStake',
+        destination: '/docs/rpcs/p-chain/validators/platform_getCurrentValidators',
+        permanent: true,
+      },
       {
         source: '/docs/api-reference/x-chain/txn-format',
         destination: '/docs/rpcs/x-chain/txn-format',
@@ -824,7 +840,7 @@ const config = {
       },
       {
         source: '/docs/tooling/rpc-providers',
-        destination: '/integrations#rpc-providers',
+        destination: '/integrations#RPC%20Endpoints',
         permanent: true,
       },
       {
@@ -1969,8 +1985,9 @@ const config = {
       },
       // Legacy docs.avax.network IA. That domain is an alias for this app rather
       // than a forward, so pre-migration paths 404 instead of redirecting. These
-      // three are linked from the upstream avalanche-foundation/ACPs READMEs,
-      // which are fetched into /docs/acps at build time.
+      // are linked from upstream READMEs that are fetched into /docs at build
+      // time: the first three from avalanche-foundation/ACPs, rpc-providers
+      // from ava-labs/icm-services.
       {
         source: "/nodes/configure/avalanchego-config-flags",
         destination: "/docs/nodes/configure/configs-flags",
@@ -1984,6 +2001,11 @@ const config = {
       {
         source: "/build/cross-chain/awm/overview",
         destination: "/docs/cross-chain/avalanche-warp-messaging/overview",
+        permanent: true,
+      },
+      {
+        source: "/tooling/rpc-providers",
+        destination: "/integrations#RPC%20Endpoints",
         permanent: true,
       },
       // Docker node setup redirect
